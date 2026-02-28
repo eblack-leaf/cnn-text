@@ -23,8 +23,7 @@ pub struct TextCnnConfig {
     pub conv1_filters: usize,
     #[config(default = 64)]
     pub conv2_filters: usize,
-    /// If true, embedding weights are marked `require_grad = false` at init
-    /// so the optimiser never updates them.
+    /// Freeze embedding weights during training (only meaningful with GloVe).
     #[config(default = false)]
     pub freeze_embeddings: bool,
 }
@@ -34,7 +33,6 @@ impl TextCnnConfig {
         self.class_names.len()
     }
 
-    /// Initialise the model with random embeddings.
     pub fn init<B: Backend>(&self, device: &B::Device) -> TextCnn<B> {
         let embedding = EmbeddingConfig::new(self.vocab_size, self.embed_dim).init(device);
         let embedding = if self.freeze_embeddings { embedding.no_grad() } else { embedding };
@@ -53,7 +51,7 @@ impl TextCnnConfig {
     /// Initialise the model with pretrained embedding vectors.
     ///
     /// `vectors` must include the PAD row at index 0 and UNK row at index 1;
-    /// `embed_dim` is derived from `vectors[0].len()` and overrides `self.embed_dim`.
+    /// `embed_dim` is derived from `vectors[0].len()`.
     pub fn init_with_embeddings<B: Backend>(
         &self,
         device:  &B::Device,
@@ -101,7 +99,6 @@ pub struct TextCnn<B: Backend> {
 }
 
 impl<B: Backend> TextCnn<B> {
-    /// Save weights and config to `dir/`.
     pub fn save_pretrained(&self, config: &TextCnnConfig, dir: &str) {
         std::fs::create_dir_all(dir).unwrap();
         self.clone()
@@ -114,7 +111,6 @@ impl<B: Backend> TextCnn<B> {
         .unwrap();
     }
 
-    /// Load model and config from a directory written by `save_pretrained`.
     pub fn from_pretrained(dir: &str, device: &B::Device) -> (Self, TextCnnConfig) {
         let config: TextCnnConfig = serde_json::from_str(
             &std::fs::read_to_string(format!("{dir}/config.json"))

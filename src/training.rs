@@ -6,7 +6,7 @@ use burn::{
     prelude::Module,
     data::dataloader::DataLoaderBuilder,
     optim::AdamConfig,
-    record::CompactRecorder,
+
     tensor::backend::{AutodiffBackend, Backend},
     train::{
         ClassificationOutput, InferenceStep, Learner, SupervisedTraining, TrainOutput, TrainStep,
@@ -77,7 +77,6 @@ pub struct TrainingConfig {
 
 // ── GloVe helpers ─────────────────────────────────────────────────────────────
 
-/// Collect every whitespace-split, lowercased word that appears in the dataset.
 fn collect_corpus_words(data_path: &str) -> HashSet<String> {
     let content = std::fs::read_to_string(data_path)
         .unwrap_or_else(|e| panic!("Cannot read {data_path}: {e}"));
@@ -92,8 +91,6 @@ fn collect_corpus_words(data_path: &str) -> HashSet<String> {
     words
 }
 
-/// Parse a GloVe text file, keeping only words present in `corpus_words`.
-/// Returns `(words, vectors)` — does NOT include PAD/UNK rows.
 pub fn load_glove(
     path:         &str,
     corpus_words: &HashSet<String>,
@@ -143,12 +140,10 @@ pub fn train<B: AutodiffBackend>(
 
     let (train_ds, val_ds, tokenizer, model_config, embedding_matrix) =
         if let Some(glove) = glove_path {
-            // ── GloVe path ────────────────────────────────────────────────────
             let corpus_words = collect_corpus_words(data_path);
             let (glove_words, glove_vecs) = load_glove(glove, &corpus_words);
             let embed_dim = glove_vecs[0].len();
 
-            // Embedding matrix: row 0 = PAD (zeros), row 1 = UNK (zeros), then GloVe
             let zeros = vec![0.0f32; embed_dim];
             let mut matrix = vec![zeros.clone(), zeros];
             matrix.extend(glove_vecs);
@@ -182,7 +177,6 @@ pub fn train<B: AutodiffBackend>(
 
             (train_ds, val_ds, tokenizer, mc, Some(matrix))
         } else {
-            // ── BPE path (original) ───────────────────────────────────────────
             let (train_ds, val_ds, tokenizer, class_names) = TextDataset::from_csv(
                 data_path,
                 config.max_seq_len,
@@ -204,14 +198,14 @@ pub fn train<B: AutodiffBackend>(
             (train_ds, val_ds, tokenizer, mc, None)
         };
 
-    let _ = tokenizer; // saved to disk; not needed further
+    let _ = tokenizer;
 
     // ── Model ─────────────────────────────────────────────────────────────────
 
     let model = if let Some(ref matrix) = embedding_matrix {
-        // Initialise with pretrained weights on CPU (NdArray) to avoid Burn's
-        // Wgpu fusion backend garbage-collecting the custom Param tensor handle.
-        // Save to a temp dir then reload normally on the training backend.
+        // Initialise on CPU (NdArray) then reload on the training backend so
+        // the wgpu fusion backend receives weights through the normal record
+        // path rather than a manually-constructed Param handle.
         let init_dir = format!("{model_dir}/.pretrained_init");
         let cpu_model = model_config.init_with_embeddings::<NdArray>(&Default::default(), matrix);
         cpu_model.save_pretrained(&model_config, &init_dir);
@@ -250,7 +244,6 @@ pub fn train<B: AutodiffBackend>(
         .metric_valid_numeric(AccuracyMetric::<NdArray>::new())
         .metric_train_numeric(LossMetric::<NdArray>::new())
         .metric_valid_numeric(LossMetric::<NdArray>::new())
-        .with_file_checkpointer(CompactRecorder::new())
         .num_epochs(config.num_epochs)
         .summary()
         .launch(learner);
