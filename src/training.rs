@@ -232,6 +232,11 @@ pub fn train<B: AutodiffBackend>(
     .unwrap()
     .progress_chars("=>-");
 
+    // ── Metrics log ───────────────────────────────────────────────────────────
+
+    let metrics_path = format!("{model_dir}/metrics.csv");
+    std::fs::write(&metrics_path, "epoch,train_loss,train_acc,val_loss,val_acc\n").unwrap();
+
     // ── Epoch loop ────────────────────────────────────────────────────────────
 
     for epoch in 1..=config.num_epochs {
@@ -319,6 +324,10 @@ pub fn train<B: AutodiffBackend>(
         valid_model.clone()
             .save_file(format!("{ckpt_dir}/model-{epoch}"), &burn::record::CompactRecorder::new())
             .unwrap();
+
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&metrics_path).unwrap();
+        writeln!(f, "{epoch},{train_loss:.4},{train_acc:.2},{val_loss:.4},{val_acc:.2}").unwrap();
 
         println!(
             "  saved  train loss={train_loss:.3} acc={train_acc:.1}%  |  val loss={val_loss:.3} acc={val_acc:.1}%",
