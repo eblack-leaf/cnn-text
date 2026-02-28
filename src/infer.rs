@@ -9,11 +9,11 @@ type B = NdArray;
 
 /// Predict the class of `text`.
 /// Returns `(class_name, confidence_0..1)`.
-pub fn predict(text: &str, artifact_dir: &str) -> (String, f32) {
+pub fn predict(text: &str, model_dir: &str) -> (String, f32) {
     let device = Default::default();
 
-    let (model, config) = TextCnn::<B>::from_pretrained(artifact_dir, &device);
-    let tokenizer = Tokenizer::load(&format!("{artifact_dir}/tokenizer.json"));
+    let (model, config) = TextCnn::<B>::from_pretrained(model_dir, &device);
+    let tokenizer = Tokenizer::load(&format!("{model_dir}/tokenizer.json"));
 
     let tokens = tokenizer.encode(text);
     let seq_len = tokens.len();

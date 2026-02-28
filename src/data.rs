@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use ahash::AHashMap;
 
 use burn::{
     data::{dataloader::batcher::Batcher, dataset::Dataset},
@@ -7,7 +8,8 @@ use burn::{
 use tokenizers::{
     AddedToken, PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer as HfTokenizer,
     TruncationDirection, TruncationParams, TruncationStrategy,
-    models::{TrainerWrapper, bpe::{BPE, BpeTrainer}},
+    models::{TrainerWrapper, bpe::{BPE, BpeTrainer}, wordlevel::WordLevel},
+    normalizers::utils::Lowercase,
     pre_tokenizers::whitespace::Whitespace,
 };
 
@@ -51,6 +53,48 @@ impl Tokenizer {
 
         tokenizer.add_special_tokens(&special_tokens);
 
+        tokenizer.with_padding(Some(PaddingParams {
+            strategy:           PaddingStrategy::Fixed(max_len),
+            direction:          PaddingDirection::Right,
+            pad_id:             0,
+            pad_type_id:        0,
+            pad_token:          PAD_TOKEN.to_string(),
+            pad_to_multiple_of: None,
+        }));
+        tokenizer
+            .with_truncation(Some(TruncationParams {
+                max_length: max_len,
+                direction:  TruncationDirection::Right,
+                stride:     0,
+                strategy:   TruncationStrategy::LongestFirst,
+            }))
+            .unwrap();
+
+        Self { inner: tokenizer, max_len }
+    }
+
+    /// Build a word-level tokenizer from an existing vocabulary (e.g. GloVe words).
+    ///
+    /// `words` should NOT include PAD/UNK — those are inserted at indices 0/1.
+    /// A Lowercase normalizer is applied so input text is auto-lowercased at
+    /// encode time, matching GloVe's lowercase vocabulary.
+    pub fn from_word_vocab(words: &[String], max_len: usize) -> Self {
+        let mut vocab: AHashMap<String, u32> = AHashMap::new();
+        vocab.insert(PAD_TOKEN.to_string(), 0);
+        vocab.insert(UNK_TOKEN.to_string(), 1);
+        for (i, word) in words.iter().enumerate() {
+            vocab.insert(word.clone(), (i + 2) as u32);
+        }
+
+        let mut tokenizer = HfTokenizer::new(
+            WordLevel::builder()
+                .vocab(vocab)
+                .unk_token(UNK_TOKEN.to_string())
+                .build()
+                .unwrap(),
+        );
+        tokenizer.with_pre_tokenizer(Some(Whitespace::default()));
+        tokenizer.with_normalizer(Some(Lowercase));
         tokenizer.with_padding(Some(PaddingParams {
             strategy:           PaddingStrategy::Fixed(max_len),
             direction:          PaddingDirection::Right,
@@ -188,6 +232,64 @@ impl TextDataset {
             TextDataset { samples: train_samples },
             TextDataset { samples: val_samples },
             tokenizer,
+            class_names,
+        )
+    }
+
+    /// Load from CSV using a pre-built tokenizer (e.g. from GloVe).
+    /// Returns `(train_dataset, val_dataset, class_names)`.
+    pub fn from_csv_tokenized(
+        path:      &str,
+        tokenizer: &Tokenizer,
+        val_ratio: f32,
+    ) -> (Self, Self, Vec<String>) {
+        let content = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("Cannot read {path}: {e}"));
+
+        let raw: Vec<(String, String)> = content
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.splitn(2, ',');
+                let label = parts.next()?.trim().to_string();
+                let text  = parts.next()?.trim().to_string();
+                if label.is_empty() || text.is_empty() { return None; }
+                Some((label, text))
+            })
+            .collect();
+
+        let mut class_names: Vec<String> = raw.iter().map(|(l, _)| l.clone()).collect();
+        class_names.sort();
+        class_names.dedup();
+        let class2idx: HashMap<&str, i32> = class_names
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.as_str(), i as i32))
+            .collect();
+
+        let mut samples: Vec<TextSample> = raw
+            .iter()
+            .map(|(label, text)| TextSample {
+                tokens: tokenizer.encode(text),
+                label:  class2idx[label.as_str()],
+            })
+            .collect();
+
+        let mut rng: u64 = 42;
+        for i in (1..samples.len()).rev() {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let j = (rng as usize) % (i + 1);
+            samples.swap(i, j);
+        }
+
+        let n_val = ((samples.len() as f32) * val_ratio).round() as usize;
+        let val_samples   = samples[..n_val].to_vec();
+        let train_samples = samples[n_val..].to_vec();
+
+        (
+            TextDataset { samples: train_samples },
+            TextDataset { samples: val_samples },
             class_names,
         )
     }
