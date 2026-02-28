@@ -80,10 +80,13 @@ Each run saves to its own directory:
 
 ```
 artifacts/<model>/
-  tokenizer.json   # vocab + padding config (BPE or word-level)
-  config.json      # arch hyperparams + class names
-  model.mpk        # final model weights (CompactRecorder)
-  checkpoint/      # per-epoch checkpoints
+  tokenizer.json        # vocab + padding config (BPE or word-level)
+  config.json           # arch hyperparams + class names
+  model.mpk             # latest weights (overwritten each epoch)
+  checkpoint/
+    model-1.mpk         # per-epoch checkpoints
+    model-2.mpk
+    ...
 ```
 
 ## Predict
@@ -93,7 +96,7 @@ cargo run --release -- predict <model> "text to classify"
 # Sports  (94.3%)
 ```
 
-Prediction always runs on the final saved weights. To use a checkpoint instead:
+Prediction always runs on the latest saved weights (`model.mpk`). To roll back to an earlier epoch:
 
 ```bash
 cp artifacts/<model>/checkpoint/model-3.mpk artifacts/<model>/model.mpk
@@ -114,4 +117,4 @@ Or permanently in `Cargo.toml`:
 default = []   # drop "gpu"
 ```
 
-Note: training metrics always sync to `NdArray` internally regardless of backend — this is a Burn design choice, not a bug. Inference always uses `NdArray` regardless of the feature flag.
+Note: Inference always uses `NdArray` regardless of the feature flag.

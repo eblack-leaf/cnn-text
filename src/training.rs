@@ -5,40 +5,17 @@ use burn::{
     config::Config,
     prelude::Module,
     data::dataloader::DataLoaderBuilder,
-    optim::AdamConfig,
-
+    optim::{AdamConfig, GradientsParams, Optimizer},
     tensor::backend::{AutodiffBackend, Backend},
-    train::{
-        ClassificationOutput, InferenceStep, Learner, SupervisedTraining, TrainOutput, TrainStep,
-        metric::{AccuracyMetric, LossMetric},
-    },
+    module::AutodiffModule,
+    tensor::ElementConversion,
 };
 use burn::data::dataset::Dataset;
+use indicatif::{ProgressBar, ProgressStyle};
 use crate::{
-    data::{TextBatch, TextBatcher, TextDataset, Tokenizer},
-    model::{TextCnn, TextCnnConfig},
+    data::{TextBatcher, TextDataset, Tokenizer},
+    model::TextCnnConfig,
 };
-
-// ── TrainStep / InferenceStep ─────────────────────────────────────────────────
-
-impl<B: AutodiffBackend> TrainStep for TextCnn<B> {
-    type Input  = TextBatch<B>;
-    type Output = ClassificationOutput<B>;
-
-    fn step(&self, item: TextBatch<B>) -> TrainOutput<ClassificationOutput<B>> {
-        let out = self.forward_classification(item.tokens, item.labels);
-        TrainOutput::new(self, out.loss.backward(), out)
-    }
-}
-
-impl<B: Backend> InferenceStep for TextCnn<B> {
-    type Input  = TextBatch<B>;
-    type Output = ClassificationOutput<B>;
-
-    fn step(&self, item: TextBatch<B>) -> ClassificationOutput<B> {
-        self.forward_classification(item.tokens, item.labels)
-    }
-}
 
 // ── Training configuration ────────────────────────────────────────────────────
 
@@ -200,21 +177,21 @@ pub fn train<B: AutodiffBackend>(
 
     let _ = tokenizer;
 
+    let train_len = train_ds.len();
+    let val_len   = val_ds.len();
+
     // ── Model ─────────────────────────────────────────────────────────────────
 
-    let model = if let Some(ref matrix) = embedding_matrix {
-        // Initialise on CPU (NdArray) then reload on the training backend so
-        // the wgpu fusion backend receives weights through the normal record
-        // path rather than a manually-constructed Param handle.
+    let mut model = if let Some(ref matrix) = embedding_matrix {
         let init_dir = format!("{model_dir}/.pretrained_init");
         let cpu_model = model_config.init_with_embeddings::<NdArray>(&Default::default(), matrix);
         cpu_model.save_pretrained(&model_config, &init_dir);
-        let model = model_config
+        let m = model_config
             .init::<B>(&device)
             .load_file(format!("{init_dir}/model"), &burn::record::CompactRecorder::new(), &device)
             .unwrap();
         std::fs::remove_dir_all(&init_dir).ok();
-        model
+        m
     } else {
         model_config.init::<B>(&device)
     };
@@ -234,20 +211,119 @@ pub fn train<B: AutodiffBackend>(
         .set_device(device.clone())
         .build(val_ds);
 
-    // ── Learner ───────────────────────────────────────────────────────────────
+    let train_batches = (train_len + config.batch_size - 1) / config.batch_size;
+    let val_batches   = (val_len   + config.batch_size - 1) / config.batch_size;
 
-    let learner = Learner::new(model, config.optimizer.init(), config.learning_rate);
+    // ── Optimizer ─────────────────────────────────────────────────────────────
 
-    let result: burn::train::LearningResult<TextCnn<B::InnerBackend>> =
-        SupervisedTraining::new(model_dir, train_loader, val_loader)
-        .metric_train_numeric(AccuracyMetric::<NdArray>::new())
-        .metric_valid_numeric(AccuracyMetric::<NdArray>::new())
-        .metric_train_numeric(LossMetric::<NdArray>::new())
-        .metric_valid_numeric(LossMetric::<NdArray>::new())
-        .num_epochs(config.num_epochs)
-        .summary()
-        .launch(learner);
+    let mut optimizer = config.optimizer.init();
 
-    result.model.save_pretrained(&model_config, model_dir);
-    println!("Saved → {model_dir}/");
+    // ── Progress styles ───────────────────────────────────────────────────────
+
+    let train_style = ProgressStyle::with_template(
+        "{prefix:.bold} [{bar:40.green/dim}] {pos:>4}/{len} {msg}",
+    )
+    .unwrap()
+    .progress_chars("=>-");
+
+    let val_style = ProgressStyle::with_template(
+        "{prefix:.bold} [{bar:40.cyan/dim}] {pos:>4}/{len} {msg}",
+    )
+    .unwrap()
+    .progress_chars("=>-");
+
+    // ── Epoch loop ────────────────────────────────────────────────────────────
+
+    for epoch in 1..=config.num_epochs {
+
+        // ── Train ─────────────────────────────────────────────────────────────
+
+        let pb = ProgressBar::new(train_batches as u64);
+        pb.set_style(train_style.clone());
+        pb.set_prefix(format!("Epoch {:>2}/{} train", epoch, config.num_epochs));
+
+        let (mut sum_loss, mut n_correct, mut n_total) = (0.0f64, 0usize, 0usize);
+
+        for batch in train_loader.iter() {
+            let batch_len = batch.tokens.dims()[0];
+            let out = model.forward_classification(batch.tokens, batch.labels);
+
+            sum_loss  += out.loss.clone().into_scalar().elem::<f64>();
+            let preds  = out.output.clone().argmax(1).squeeze::<1>();
+            n_correct += preds
+                .equal(out.targets.clone())
+                .int()
+                .sum()
+                .into_scalar()
+                .elem::<i64>() as usize;
+            n_total += batch_len;
+
+            let grads = GradientsParams::from_grads(out.loss.backward(), &model);
+            model = optimizer.step(config.learning_rate, model, grads);
+
+            pb.set_message(format!(
+                "loss={:.3}  acc={:.1}%",
+                sum_loss / (pb.position() as f64),
+                100.0 * n_correct as f64 / n_total as f64,
+            ));
+            pb.inc(1);
+        }
+
+        let train_loss = sum_loss / train_batches as f64;
+        let train_acc  = 100.0 * n_correct as f64 / n_total as f64;
+        pb.finish_with_message(format!("loss={train_loss:.3}  acc={train_acc:.1}%"));
+
+        // ── Validate ──────────────────────────────────────────────────────────
+
+        let vpb = ProgressBar::new(val_batches as u64);
+        vpb.set_style(val_style.clone());
+        vpb.set_prefix(format!("Epoch {:>2}/{}   val", epoch, config.num_epochs));
+
+        let valid_model = model.valid();
+        let (mut vsum_loss, mut vn_correct, mut vn_total) = (0.0f64, 0usize, 0usize);
+
+        for batch in val_loader.iter() {
+            let batch_len = batch.tokens.dims()[0];
+            let out = valid_model.forward_classification(batch.tokens, batch.labels);
+
+            vsum_loss  += out.loss.clone().into_scalar().elem::<f64>();
+            let preds   = out.output.clone().argmax(1).squeeze::<1>();
+            vn_correct += preds
+                .equal(out.targets.clone())
+                .int()
+                .sum()
+                .into_scalar()
+                .elem::<i64>() as usize;
+            vn_total += batch_len;
+
+            vpb.set_message(format!(
+                "loss={:.3}  acc={:.1}%",
+                vsum_loss / (vpb.position() as f64),
+                100.0 * vn_correct as f64 / vn_total as f64,
+            ));
+            vpb.inc(1);
+        }
+
+        let val_loss = vsum_loss / val_batches as f64;
+        let val_acc  = 100.0 * vn_correct as f64 / vn_total as f64;
+        vpb.finish_with_message(format!("loss={val_loss:.3}  acc={val_acc:.1}%"));
+
+        // ── Checkpoint ────────────────────────────────────────────────────────
+
+        // Latest weights (used by inference)
+        valid_model.save_pretrained(&model_config, model_dir);
+
+        // Per-epoch checkpoint
+        let ckpt_dir = format!("{model_dir}/checkpoint");
+        std::fs::create_dir_all(&ckpt_dir).unwrap();
+        valid_model.clone()
+            .save_file(format!("{ckpt_dir}/model-{epoch}"), &burn::record::CompactRecorder::new())
+            .unwrap();
+
+        println!(
+            "  saved  train loss={train_loss:.3} acc={train_acc:.1}%  |  val loss={val_loss:.3} acc={val_acc:.1}%",
+        );
+    }
+
+    println!("\nDone. Model saved → {model_dir}/");
 }
