@@ -10,7 +10,7 @@ use burn::{
         metric::{AccuracyMetric, LossMetric},
     },
 };
-
+use burn::data::dataset::Dataset;
 use crate::{
     data::{TextBatch, TextBatcher, TextDataset},
     model::{TextCnn, TextCnnConfig},
