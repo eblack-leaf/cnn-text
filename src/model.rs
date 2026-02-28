@@ -6,37 +6,34 @@ use burn::{
         conv::{Conv1d, Conv1dConfig},
         loss::CrossEntropyLossConfig,
     },
+    record::CompactRecorder,
     tensor::{Int, Tensor, activation::relu, backend::Backend},
     train::ClassificationOutput,
 };
 
-/// Configuration for the TextCNN.
-///
-/// The only field you change between tasks is `num_classes`:
-///   - 2  → binary (spam / ham)
-///   - N  → multi-class intent detection, topic classification, etc.
 #[derive(Config, Debug)]
 pub struct TextCnnConfig {
-    /// Total tokens in the vocabulary (set after building the tokenizer).
-    pub vocab_size: usize,
-    /// Number of output classes.
-    pub num_classes: usize,
-    /// Token embedding dimension.
+    pub vocab_size:    usize,
+    /// Output class names in label-index order — saved with the model so
+    /// inference needs no external class list.
+    pub class_names:   Vec<String>,
     #[config(default = 64)]
-    pub embed_dim: usize,
-    /// Filters for Conv block 1 — kernel size 3.
+    pub embed_dim:     usize,
     #[config(default = 128)]
     pub conv1_filters: usize,
-    /// Filters for Conv block 2 — kernel size 5.
     #[config(default = 64)]
     pub conv2_filters: usize,
 }
 
+impl TextCnnConfig {
+    pub fn num_classes(&self) -> usize {
+        self.class_names.len()
+    }
+}
+
 /// Text CNN:
-///
 ///   tokens [B, L]
-///     → Embedding        [B, L, E]   E = embed_dim
-///     → swap_dims        [B, E, L]   channels-first for Conv1d
+///     → Embedding        [B, L, E]
 ///     → Conv1d(3, 128) + ReLU
 ///     → Conv1d(5,  64) + ReLU
 ///     → GlobalMaxPool    [B, 64]
@@ -59,33 +56,48 @@ impl TextCnnConfig {
             conv2: Conv1dConfig::new(self.conv1_filters, self.conv2_filters, 5)
                 .with_padding(PaddingConfig1d::Same)
                 .init(device),
-            classifier: LinearConfig::new(self.conv2_filters, self.num_classes).init(device),
+            classifier: LinearConfig::new(self.conv2_filters, self.num_classes()).init(device),
         }
     }
 }
 
 impl<B: Backend> TextCnn<B> {
-    /// Forward pass. `tokens` shape: `[batch, seq_len]` (integer token ids).
-    /// Returns logits of shape `[batch, num_classes]`.
+    /// Save weights and config to `dir/`.
+    pub fn save_pretrained(&self, config: &TextCnnConfig, dir: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        self.clone()
+            .save_file(format!("{dir}/weights"), &CompactRecorder::new())
+            .unwrap();
+        std::fs::write(
+            format!("{dir}/config.json"),
+            serde_json::to_string_pretty(config).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Load model and config from a directory written by `save_pretrained`.
+    pub fn from_pretrained(dir: &str, device: &B::Device) -> (Self, TextCnnConfig) {
+        let config: TextCnnConfig = serde_json::from_str(
+            &std::fs::read_to_string(format!("{dir}/config.json"))
+                .unwrap_or_else(|_| panic!("No config.json in {dir}")),
+        )
+        .unwrap();
+        let model = config
+            .init::<B>(device)
+            .load_file(format!("{dir}/weights"), &CompactRecorder::new(), device)
+            .unwrap();
+        (model, config)
+    }
+
     pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 2> {
-        // [B, L] → [B, L, E]
         let x = self.embedding.forward(tokens);
-        // [B, L, E] → [B, E, L]  (Conv1d expects channels-first)
         let x = x.swap_dims(1, 2);
-
-        // Conv block 1: kernel=3, 128 filters
         let x = relu(self.conv1.forward(x));
-
-        // Conv block 2: kernel=5, 64 filters
         let x = relu(self.conv2.forward(x));
-
-        // Global max pool over the sequence length: [B, 64, L] → [B, 64, 1] → [B, 64]
         let x = x.max_dim(2).squeeze::<2>();
-
         self.classifier.forward(x)
     }
 
-    /// Forward with cross-entropy loss — used by TrainStep / InferenceStep.
     pub fn forward_classification(
         &self,
         tokens:  Tensor<B, 2, Int>,
@@ -98,5 +110,3 @@ impl<B: Backend> TextCnn<B> {
         ClassificationOutput::new(loss, logits, targets)
     }
 }
-
-// `#[derive(Module)]` already generates Display; no manual impl needed.

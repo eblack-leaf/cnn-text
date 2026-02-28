@@ -4,30 +4,23 @@ use burn::{
     data::{dataloader::batcher::Batcher, dataset::Dataset},
     tensor::{Int, Tensor, TensorData, backend::Backend},
 };
-use serde::{Deserialize, Serialize};
 use tokenizers::{
     AddedToken, PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer as HfTokenizer,
     TruncationDirection, TruncationParams, TruncationStrategy,
-    models::{
-        TrainerWrapper,
-        bpe::{BPE, BpeTrainer},
-    },
+    models::{TrainerWrapper, bpe::{BPE, BpeTrainer}},
     pre_tokenizers::whitespace::Whitespace,
 };
 
 // ── Tokenizer ────────────────────────────────────────────────────────────────
 
-pub const PAD_TOKEN: &str = "[PAD]"; // id = 0
-pub const UNK_TOKEN: &str = "[UNK]"; // id = 1
+const PAD_TOKEN: &str = "[PAD]"; // id 0
+const UNK_TOKEN: &str = "[UNK]"; // id 1
 
 /// BPE tokenizer trained on your corpus.
 ///
-/// Unlike a word-level tokenizer, BPE splits unknown/rare words into
-/// known subword pieces instead of mapping them to `[UNK]`. For example
-/// "spamming" → ["spam", "ming"] if "spamming" is rare but "spam" is common.
-///
-/// The embeddings in the CNN are still randomly initialised and trained
-/// from scratch — the tokenizer only affects *how* text is split into IDs.
+/// Unlike a word-level tokenizer, BPE splits rare/unknown words into known
+/// subword pieces instead of `[UNK]`. The embeddings are still trained from
+/// scratch — BPE only affects how text is split into ids.
 pub struct Tokenizer {
     inner:   HfTokenizer,
     max_len: usize,
@@ -38,8 +31,8 @@ impl Tokenizer {
     /// padded/truncated encoding.
     pub fn train(texts: &[String], vocab_size: usize, max_len: usize) -> Self {
         let special_tokens = vec![
-            AddedToken::from(PAD_TOKEN, true), // id 0
-            AddedToken::from(UNK_TOKEN, true), // id 1
+            AddedToken::from(PAD_TOKEN, true),
+            AddedToken::from(UNK_TOKEN, true),
         ];
 
         let trainer = BpeTrainer::builder()
@@ -49,25 +42,21 @@ impl Tokenizer {
             .build();
 
         let mut tokenizer = HfTokenizer::new(BPE::default());
-        // Split on whitespace before applying BPE merges.
         tokenizer.with_pre_tokenizer(Some(Whitespace::default()));
 
-        // `Tokenizer` stores a `ModelWrapper`, so the trainer must be wrapped too.
         let mut trainer_wrapper: TrainerWrapper = trainer.into();
         tokenizer
             .train(&mut trainer_wrapper, texts.iter().map(String::as_str))
             .unwrap();
 
-        // Add special tokens so they're always recognised even if not in training data.
         tokenizer.add_special_tokens(&special_tokens);
 
-        // Configure automatic padding (right-pad with [PAD]) and truncation.
         tokenizer.with_padding(Some(PaddingParams {
-            strategy:          PaddingStrategy::Fixed(max_len),
-            direction:         PaddingDirection::Right,
-            pad_id:            0,
-            pad_type_id:       0,
-            pad_token:         PAD_TOKEN.to_string(),
+            strategy:           PaddingStrategy::Fixed(max_len),
+            direction:          PaddingDirection::Right,
+            pad_id:             0,
+            pad_type_id:        0,
+            pad_token:          PAD_TOKEN.to_string(),
             pad_to_multiple_of: None,
         }));
         tokenizer
@@ -82,31 +71,18 @@ impl Tokenizer {
         Self { inner: tokenizer, max_len }
     }
 
-    /// Save tokenizer to a JSON file (so you don't retrain on every run).
     pub fn save(&self, path: &str) {
         self.inner.save(path, false).unwrap();
     }
 
-    /// Load a previously saved tokenizer (use this at inference time).
-    #[allow(dead_code)]
-    pub fn load(path: &str, max_len: usize) -> Self {
-        let mut inner = HfTokenizer::from_file(path).unwrap();
-        inner.with_padding(Some(PaddingParams {
-            strategy:          PaddingStrategy::Fixed(max_len),
-            direction:         PaddingDirection::Right,
-            pad_id:            0,
-            pad_type_id:       0,
-            pad_token:         PAD_TOKEN.to_string(),
-            pad_to_multiple_of: None,
-        }));
-        inner
-            .with_truncation(Some(TruncationParams {
-                max_length: max_len,
-                direction:  TruncationDirection::Right,
-                stride:     0,
-                strategy:   TruncationStrategy::LongestFirst,
-            }))
-            .unwrap();
+    /// Load a saved tokenizer. Padding/truncation are restored from the JSON.
+    pub fn load(path: &str) -> Self {
+        let inner = HfTokenizer::from_file(path)
+            .unwrap_or_else(|_| panic!("Cannot load tokenizer from {path}"));
+        let max_len = inner
+            .get_padding()
+            .map(|p| match p.strategy { PaddingStrategy::Fixed(n) => n, _ => 128 })
+            .unwrap_or(128);
         Self { inner, max_len }
     }
 
@@ -117,7 +93,6 @@ impl Tokenizer {
     /// Encode `text` to a padded/truncated `Vec<i32>` of length `max_len`.
     pub fn encode(&self, text: &str) -> Vec<i32> {
         let enc = self.inner.encode(text, false).unwrap();
-        // with_padding + with_truncation guarantee exactly max_len ids.
         assert_eq!(enc.get_ids().len(), self.max_len, "tokenizer padding misconfigured");
         enc.get_ids().iter().map(|&id| id as i32).collect()
     }
@@ -125,26 +100,20 @@ impl Tokenizer {
 
 // ── Dataset ──────────────────────────────────────────────────────────────────
 
-/// A single labeled example ready for batching.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct TextSample {
-    pub tokens: Vec<i32>, // length == max_seq_len
+    pub tokens: Vec<i32>,
     pub label:  i32,
 }
 
-/// In-memory labeled text dataset.
 pub struct TextDataset {
-    samples:         Vec<TextSample>,
-    #[allow(dead_code)]
-    pub num_classes: usize,
+    samples: Vec<TextSample>,
 }
 
 impl TextDataset {
     /// Load from a **headerless** CSV with format: `label,text`
     ///
-    /// Trains a BPE tokenizer on the corpus texts and saves it to
-    /// `{artifact_dir}/tokenizer.json` so you can reload it at inference time.
-    ///
+    /// Trains (or loads) a BPE tokenizer saved to `tokenizer_path`.
     /// Returns `(train_dataset, val_dataset, tokenizer, class_names)`.
     pub fn from_csv(
         path:           &str,
@@ -167,11 +136,10 @@ impl TextDataset {
             })
             .collect();
 
-        // Stable label → int mapping (alphabetical).
+        // Stable label → int mapping (alphabetical order).
         let mut class_names: Vec<String> = raw.iter().map(|(l, _)| l.clone()).collect();
         class_names.sort();
         class_names.dedup();
-        let num_classes = class_names.len();
         let class2idx: HashMap<&str, i32> = class_names
             .iter()
             .enumerate()
@@ -180,19 +148,17 @@ impl TextDataset {
 
         let texts: Vec<String> = raw.iter().map(|(_, t)| t.clone()).collect();
 
-        // Load existing tokenizer if available; train and save otherwise.
-        // tokenizer_path lives next to the data (committed), not in artifacts.
         let tokenizer = if std::path::Path::new(tokenizer_path).exists() {
             println!("Loading tokenizer from {tokenizer_path}");
-            Tokenizer::load(tokenizer_path, max_len)
+            Tokenizer::load(tokenizer_path)
         } else {
             println!("Training BPE tokenizer…");
-            let tok = Tokenizer::train(&texts, vocab_size, max_len);
             if let Some(parent) = std::path::Path::new(tokenizer_path).parent() {
                 std::fs::create_dir_all(parent).ok();
             }
+            let tok = Tokenizer::train(&texts, vocab_size, max_len);
             tok.save(tokenizer_path);
-            println!("BPE tokenizer trained and saved: vocab_size={}", tok.vocab_size());
+            println!("Saved tokenizer: vocab_size={}", tok.vocab_size());
             tok
         };
 
@@ -204,7 +170,7 @@ impl TextDataset {
             })
             .collect();
 
-        // Deterministic shuffle (xorshift, no extra deps).
+        // Deterministic shuffle before split (xorshift, no extra deps).
         let mut rng: u64 = 42;
         for i in (1..samples.len()).rev() {
             rng ^= rng << 13;
@@ -219,15 +185,11 @@ impl TextDataset {
         let train_samples = samples[n_val..].to_vec();
 
         (
-            TextDataset { samples: train_samples, num_classes },
-            TextDataset { samples: val_samples,   num_classes },
+            TextDataset { samples: train_samples },
+            TextDataset { samples: val_samples },
             tokenizer,
             class_names,
         )
-    }
-
-    pub fn len(&self) -> usize {
-        self.samples.len()
     }
 }
 
@@ -242,7 +204,6 @@ impl Dataset<TextSample> for TextDataset {
 
 // ── Batcher ──────────────────────────────────────────────────────────────────
 
-/// Collated batch passed to the model.
 #[derive(Clone, Debug)]
 pub struct TextBatch<B: Backend> {
     /// Shape: `[batch_size, seq_len]`

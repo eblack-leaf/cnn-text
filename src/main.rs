@@ -1,4 +1,5 @@
 mod data;
+mod infer;
 mod model;
 mod training;
 
@@ -6,23 +7,38 @@ use burn::backend::{Autodiff, NdArray};
 use burn::optim::AdamConfig;
 use training::{TrainingConfig, train};
 
-// ── Backend ───────────────────────────────────────────────────────────────────
-type Backend         = NdArray;
-type AutodiffBackend = Autodiff<Backend>;
-// GPU: swap to Wgpu + add `wgpu` feature in Cargo.toml
+type AutodiffBackend = Autodiff<NdArray>;
 
 fn main() {
-    // Dataset: headerless CSV, format `label,text`.
-    // Labels are arbitrary strings — 2 labels → binary, N labels → N-class.
-    let data_path    = "data/dataset.csv";
-    let artifact_dir = "artifacts";
+    let args: Vec<String> = std::env::args().collect();
 
-    // Hyperparameters only — vocab_size and num_classes are resolved from data.
-    let config = TrainingConfig::new(AdamConfig::new())
-        .with_num_epochs(10)
-        .with_batch_size(32)
-        .with_max_seq_len(128)
-        .with_vocab_size(8192);   // BPE target; actual size depends on corpus
+    match args.get(1).map(String::as_str) {
+        // cargo run -- predict <run> "text"
+        Some("predict") => {
+            let run  = args.get(2).expect("Usage: predict <run> \"<text>\"");
+            let text = args.get(3).expect("Usage: predict <run> \"<text>\"");
+            let (class, confidence) = infer::predict(text, &format!("artifacts/{run}"));
+            println!("{class}  ({:.1}%)", confidence * 100.0);
+        }
 
-    train::<AutodiffBackend>(data_path, &config, artifact_dir, Default::default());
+        // cargo run -- train <run>   (or just cargo run for "default")
+        Some("train") | None => {
+            let run = args.get(2).map(String::as_str).unwrap_or("default");
+
+            let config = TrainingConfig::new(AdamConfig::new())
+                .with_num_epochs(10)
+                .with_batch_size(32)
+                .with_max_seq_len(128)
+                .with_vocab_size(8192);
+
+            train::<AutodiffBackend>(
+                "data/dataset.csv",
+                &config,
+                &format!("artifacts/{run}"),
+                Default::default(),
+            );
+        }
+
+        Some(cmd) => eprintln!("Unknown command: {cmd}. Use 'train' or 'predict'."),
+    }
 }
