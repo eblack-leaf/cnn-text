@@ -23,8 +23,8 @@ pub struct TextCnnConfig {
     pub conv1_filters: usize,
     #[config(default = 64)]
     pub conv2_filters: usize,
-    /// If true, embedding gradients are detached during the forward pass so
-    /// the embedding weights are not updated by the optimiser.
+    /// If true, embedding weights are marked `require_grad = false` at init
+    /// so the optimiser never updates them.
     #[config(default = false)]
     pub freeze_embeddings: bool,
 }
@@ -36,8 +36,10 @@ impl TextCnnConfig {
 
     /// Initialise the model with random embeddings.
     pub fn init<B: Backend>(&self, device: &B::Device) -> TextCnn<B> {
+        let embedding = EmbeddingConfig::new(self.vocab_size, self.embed_dim).init(device);
+        let embedding = if self.freeze_embeddings { embedding.no_grad() } else { embedding };
         TextCnn {
-            embedding: EmbeddingConfig::new(self.vocab_size, self.embed_dim).init(device),
+            embedding,
             conv1: Conv1dConfig::new(self.embed_dim, self.conv1_filters, 3)
                 .with_padding(PaddingConfig1d::Same)
                 .init(device),
@@ -45,7 +47,6 @@ impl TextCnnConfig {
                 .with_padding(PaddingConfig1d::Same)
                 .init(device),
             classifier: LinearConfig::new(self.conv2_filters, self.num_classes()).init(device),
-            freeze_embeddings: self.freeze_embeddings,
         }
     }
 
@@ -69,6 +70,7 @@ impl TextCnnConfig {
         let embedding = EmbeddingConfig::new(vocab_size, embed_dim)
             .init(device)
             .load_record(EmbeddingRecord { weight: Param::initialized(ParamId::new(), weight) });
+        let embedding = if self.freeze_embeddings { embedding.no_grad() } else { embedding };
 
         TextCnn {
             embedding,
@@ -79,7 +81,6 @@ impl TextCnnConfig {
                 .with_padding(PaddingConfig1d::Same)
                 .init(device),
             classifier: LinearConfig::new(self.conv2_filters, self.num_classes()).init(device),
-            freeze_embeddings: self.freeze_embeddings,
         }
     }
 }
@@ -93,11 +94,10 @@ impl TextCnnConfig {
 ///     → Linear           [B, num_classes]
 #[derive(Module, Debug)]
 pub struct TextCnn<B: Backend> {
-    embedding:        Embedding<B>,
-    conv1:            Conv1d<B>,
-    conv2:            Conv1d<B>,
-    classifier:       Linear<B>,
-    freeze_embeddings: bool,
+    embedding:  Embedding<B>,
+    conv1:      Conv1d<B>,
+    conv2:      Conv1d<B>,
+    classifier: Linear<B>,
 }
 
 impl<B: Backend> TextCnn<B> {
@@ -130,7 +130,6 @@ impl<B: Backend> TextCnn<B> {
 
     pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 2> {
         let x = self.embedding.forward(tokens);
-        let x = if self.freeze_embeddings { x.detach() } else { x };
         let x = x.swap_dims(1, 2);
         let x = relu(self.conv1.forward(x));
         let x = relu(self.conv2.forward(x));
