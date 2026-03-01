@@ -4,7 +4,7 @@ use burn::{
     backend::NdArray,
     config::Config,
     prelude::Module,
-    data::dataloader::DataLoaderBuilder,
+    data::dataloader::{DataLoader, DataLoaderBuilder},
     optim::{AdamConfig, GradientsParams, Optimizer},
     tensor::backend::{AutodiffBackend, Backend},
     module::AutodiffModule,
@@ -13,8 +13,8 @@ use burn::{
 use burn::data::dataset::Dataset;
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::{
-    data::{TextBatcher, TextDataset, Tokenizer},
-    model::TextCnnConfig,
+    data::{TextBatch, TextBatcher, TextDataset, Tokenizer},
+    model::{Classify, FastTextConfig, KimCnnConfig},
 };
 
 // ── Training configuration ────────────────────────────────────────────────────
@@ -40,16 +40,22 @@ pub struct TrainingConfig {
     /// BPE vocabulary size target (ignored when using GloVe).
     #[config(default = 8192)]
     pub vocab_size: usize,
-    // ── Model architecture ────────────────────────────────────────────────────
-    #[config(default = 64)]
+    // ── Architecture ──────────────────────────────────────────────────────────
+    #[config(default = 100)]
     pub embed_dim: usize,
-    #[config(default = 128)]
-    pub conv1_filters: usize,
-    #[config(default = 64)]
-    pub conv2_filters: usize,
     /// Freeze embedding weights during training (only meaningful with GloVe).
     #[config(default = false)]
     pub freeze_embeddings: bool,
+    /// Stop if val loss hasn't improved for this many epochs. 0 = disabled.
+    #[config(default = 3)]
+    pub patience: usize,
+    // ── Kim CNN specific ──────────────────────────────────────────────────────
+    /// Filters per kernel size (total output dim = num_filters × 3).
+    #[config(default = 128)]
+    pub num_filters: usize,
+    /// Dropout probability after concatenation.
+    #[config(default = 0.5)]
+    pub dropout: f64,
 }
 
 // ── GloVe helpers ─────────────────────────────────────────────────────────────
@@ -97,147 +103,40 @@ pub fn load_glove(
     (words, vecs)
 }
 
-// ── Training entry point ──────────────────────────────────────────────────────
+// ── Shared epoch loop ─────────────────────────────────────────────────────────
+//
+// Generic over model type M. The only arch-specific part — `save_best` — is
+// injected as a closure so neither model type leaks into this function.
 
-pub fn train<B: AutodiffBackend>(
-    data_path:  &str,
-    glove_path: Option<&str>,
-    config:     &TrainingConfig,
-    model_dir:  &str,
-    device:     B::Device,
+fn run_epochs<B, M, O>(
+    mut model:         M,
+    mut optimizer:     O,
+    config:            &TrainingConfig,
+    train_loader:      &dyn DataLoader<B, TextBatch<B>>,
+    val_loader:        &dyn DataLoader<B::InnerBackend, TextBatch<B::InnerBackend>>,
+    train_eval_loader: &dyn DataLoader<B::InnerBackend, TextBatch<B::InnerBackend>>,
+    train_batches:     usize,
+    val_batches:       usize,
+    metrics_path:      &str,
+    model_dir:         &str,
+    save_best:         impl Fn(&M::InnerModule, &str),
 ) where
+    B: AutodiffBackend,
     B::InnerBackend: Backend,
+    M: AutodiffModule<B> + Classify<B>,
+    M::InnerModule: Classify<B::InnerBackend>,
+    O: Optimizer<M, B>,
 {
-    B::seed(&device, config.seed);
-    std::fs::create_dir_all(model_dir).expect("Could not create model directory");
-
-    let tokenizer_path = format!("{model_dir}/tokenizer.json");
-
-    // ── Data + model config ───────────────────────────────────────────────────
-
-    let (train_ds, val_ds, tokenizer, model_config, embedding_matrix) =
-        if let Some(glove) = glove_path {
-            let corpus_words = collect_corpus_words(data_path);
-            let (glove_words, glove_vecs) = load_glove(glove, &corpus_words);
-            let embed_dim = glove_vecs[0].len();
-
-            let zeros = vec![0.0f32; embed_dim];
-            let mut matrix = vec![zeros.clone(), zeros];
-            matrix.extend(glove_vecs);
-
-            let tokenizer = if std::path::Path::new(&tokenizer_path).exists() {
-                println!("Loading tokenizer from {tokenizer_path}");
-                Tokenizer::load(&tokenizer_path)
-            } else {
-                println!("Building word-level tokenizer from GloVe vocab…");
-                if let Some(p) = std::path::Path::new(&tokenizer_path).parent() {
-                    std::fs::create_dir_all(p).ok();
-                }
-                let tok = Tokenizer::from_word_vocab(&glove_words, config.max_seq_len);
-                tok.save(&tokenizer_path);
-                tok
-            };
-
-            let (train_ds, val_ds, class_names) =
-                TextDataset::from_csv_tokenized(data_path, &tokenizer, config.val_ratio);
-
-            println!(
-                "Loaded: {} train / {} val — {} classes: {:?}",
-                train_ds.len(), val_ds.len(), class_names.len(), class_names,
-            );
-
-            let mc = TextCnnConfig::new(matrix.len(), class_names)
-                .with_embed_dim(embed_dim)
-                .with_conv1_filters(config.conv1_filters)
-                .with_conv2_filters(config.conv2_filters)
-                .with_freeze_embeddings(config.freeze_embeddings);
-
-            (train_ds, val_ds, tokenizer, mc, Some(matrix))
-        } else {
-            let (train_ds, val_ds, tokenizer, class_names) = TextDataset::from_csv(
-                data_path,
-                config.max_seq_len,
-                config.val_ratio,
-                config.vocab_size,
-                &tokenizer_path,
-            );
-
-            println!(
-                "Loaded: {} train / {} val — {} classes: {:?}",
-                train_ds.len(), val_ds.len(), class_names.len(), class_names,
-            );
-
-            let mc = TextCnnConfig::new(tokenizer.vocab_size(), class_names)
-                .with_embed_dim(config.embed_dim)
-                .with_conv1_filters(config.conv1_filters)
-                .with_conv2_filters(config.conv2_filters);
-
-            (train_ds, val_ds, tokenizer, mc, None)
-        };
-
-    let _ = tokenizer;
-
-    let train_len = train_ds.len();
-    let val_len   = val_ds.len();
-
-    // ── Model ─────────────────────────────────────────────────────────────────
-
-    let mut model = if let Some(ref matrix) = embedding_matrix {
-        let init_dir = format!("{model_dir}/.pretrained_init");
-        let cpu_model = model_config.init_with_embeddings::<NdArray>(&Default::default(), matrix);
-        cpu_model.save_pretrained(&model_config, &init_dir);
-        let m = model_config
-            .init::<B>(&device)
-            .load_file(format!("{init_dir}/model"), &burn::record::CompactRecorder::new(), &device)
-            .unwrap();
-        std::fs::remove_dir_all(&init_dir).ok();
-        m
-    } else {
-        model_config.init::<B>(&device)
-    };
-
-    // ── Loaders ───────────────────────────────────────────────────────────────
-
-    let train_loader = DataLoaderBuilder::<B, _, _>::new(TextBatcher)
-        .batch_size(config.batch_size)
-        .shuffle(config.seed)
-        .num_workers(config.num_workers)
-        .set_device(device.clone())
-        .build(train_ds);
-
-    let val_loader = DataLoaderBuilder::<B::InnerBackend, _, _>::new(TextBatcher)
-        .batch_size(config.batch_size)
-        .num_workers(config.num_workers)
-        .set_device(device.clone())
-        .build(val_ds);
-
-    let train_batches = (train_len + config.batch_size - 1) / config.batch_size;
-    let val_batches   = (val_len   + config.batch_size - 1) / config.batch_size;
-
-    // ── Optimizer ─────────────────────────────────────────────────────────────
-
-    let mut optimizer = config.optimizer.init();
-
-    // ── Progress styles ───────────────────────────────────────────────────────
-
     let train_style = ProgressStyle::with_template(
         "{prefix:.bold} [{bar:40.green/dim}] {pos:>4}/{len} {msg}",
-    )
-    .unwrap()
-    .progress_chars("=>-");
+    ).unwrap().progress_chars("=>-");
 
     let val_style = ProgressStyle::with_template(
         "{prefix:.bold} [{bar:40.cyan/dim}] {pos:>4}/{len} {msg}",
-    )
-    .unwrap()
-    .progress_chars("=>-");
+    ).unwrap().progress_chars("=>-");
 
-    // ── Metrics log ───────────────────────────────────────────────────────────
-
-    let metrics_path = format!("{model_dir}/metrics.csv");
-    std::fs::write(&metrics_path, "epoch,train_loss,train_acc,val_loss,val_acc\n").unwrap();
-
-    // ── Epoch loop ────────────────────────────────────────────────────────────
+    let mut best_val_loss = f64::MAX;
+    let mut no_improve    = 0usize;
 
     for epoch in 1..=config.num_epochs {
 
@@ -246,7 +145,6 @@ pub fn train<B: AutodiffBackend>(
         let pb = ProgressBar::new(train_batches as u64);
         pb.set_style(train_style.clone());
         pb.set_prefix(format!("Epoch {:>2}/{} train", epoch, config.num_epochs));
-
         let (mut sum_loss, mut n_correct, mut n_total) = (0.0f64, 0usize, 0usize);
 
         for batch in train_loader.iter() {
@@ -255,12 +153,8 @@ pub fn train<B: AutodiffBackend>(
 
             sum_loss  += out.loss.clone().into_scalar().elem::<f64>();
             let preds  = out.output.clone().argmax(1).squeeze::<1>();
-            n_correct += preds
-                .equal(out.targets.clone())
-                .int()
-                .sum()
-                .into_scalar()
-                .elem::<i64>() as usize;
+            n_correct += preds.equal(out.targets.clone()).int().sum()
+                .into_scalar().elem::<i64>() as usize;
             n_total += batch_len;
 
             let grads = GradientsParams::from_grads(out.loss.backward(), &model);
@@ -283,7 +177,6 @@ pub fn train<B: AutodiffBackend>(
         let vpb = ProgressBar::new(val_batches as u64);
         vpb.set_style(val_style.clone());
         vpb.set_prefix(format!("Epoch {:>2}/{}   val", epoch, config.num_epochs));
-
         let valid_model = model.valid();
         let (mut vsum_loss, mut vn_correct, mut vn_total) = (0.0f64, 0usize, 0usize);
 
@@ -293,12 +186,8 @@ pub fn train<B: AutodiffBackend>(
 
             vsum_loss  += out.loss.clone().into_scalar().elem::<f64>();
             let preds   = out.output.clone().argmax(1).squeeze::<1>();
-            vn_correct += preds
-                .equal(out.targets.clone())
-                .int()
-                .sum()
-                .into_scalar()
-                .elem::<i64>() as usize;
+            vn_correct += preds.equal(out.targets.clone()).int().sum()
+                .into_scalar().elem::<i64>() as usize;
             vn_total += batch_len;
 
             vpb.set_message(format!(
@@ -313,25 +202,232 @@ pub fn train<B: AutodiffBackend>(
         let val_acc  = 100.0 * vn_correct as f64 / vn_total as f64;
         vpb.finish_with_message(format!("loss={val_loss:.3}  acc={val_acc:.1}%"));
 
+        // ── Post-epoch train eval (same weights as val, val_batches worth) ────
+
+        let (mut te_loss, mut te_correct, mut te_total, mut te_n) =
+            (0.0f64, 0usize, 0usize, 0usize);
+        for batch in train_eval_loader.iter() {
+            if te_n >= val_batches { break; }
+            let batch_len = batch.tokens.dims()[0];
+            let out = valid_model.forward_classification(batch.tokens, batch.labels);
+            te_loss    += out.loss.clone().into_scalar().elem::<f64>();
+            let preds   = out.output.argmax(1).squeeze::<1>();
+            te_correct += preds.equal(out.targets).int().sum()
+                .into_scalar().elem::<i64>() as usize;
+            te_total   += batch_len;
+            te_n       += 1;
+        }
+        let train_eval_loss = te_loss    / te_n as f64;
+        let train_eval_acc  = 100.0 * te_correct as f64 / te_total as f64;
+
         // ── Checkpoint ────────────────────────────────────────────────────────
 
-        // Latest weights (used by inference)
-        valid_model.save_pretrained(&model_config, model_dir);
-
-        // Per-epoch checkpoint
         let ckpt_dir = format!("{model_dir}/checkpoint");
         std::fs::create_dir_all(&ckpt_dir).unwrap();
         valid_model.clone()
-            .save_file(format!("{ckpt_dir}/model-{epoch}"), &burn::record::CompactRecorder::new())
+            .save_file(
+                format!("{ckpt_dir}/model-{epoch}"),
+                &burn::record::CompactRecorder::new(),
+            )
             .unwrap();
 
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().append(true).open(&metrics_path).unwrap();
-        writeln!(f, "{epoch},{train_loss:.4},{train_acc:.2},{val_loss:.4},{val_acc:.2}").unwrap();
+        let mut f = std::fs::OpenOptions::new().append(true).open(metrics_path).unwrap();
+        writeln!(f, "{epoch},{train_eval_loss:.4},{train_eval_acc:.2},{val_loss:.4},{val_acc:.2}").unwrap();
 
-        println!(
-            "  saved  train loss={train_loss:.3} acc={train_acc:.1}%  |  val loss={val_loss:.3} acc={val_acc:.1}%",
-        );
+        // ── Early stopping / best model ───────────────────────────────────────
+
+        if val_loss < best_val_loss {
+            best_val_loss = val_loss;
+            no_improve    = 0;
+            save_best(&valid_model, model_dir);
+            println!(
+                "  best   train loss={train_eval_loss:.3} acc={train_eval_acc:.1}%  |  val loss={val_loss:.3} acc={val_acc:.1}%  ✓",
+            );
+        } else {
+            no_improve += 1;
+            let patience = config.patience;
+            println!(
+                "         train loss={train_eval_loss:.3} acc={train_eval_acc:.1}%  |  val loss={val_loss:.3} acc={val_acc:.1}%  (no improve {no_improve}/{patience})",
+            );
+            if patience > 0 && no_improve >= patience {
+                println!("Early stopping — best was epoch {}", epoch - no_improve);
+                break;
+            }
+        }
+    }
+}
+
+// ── Training entry point ──────────────────────────────────────────────────────
+
+pub fn train<B: AutodiffBackend>(
+    data_path:  &str,
+    glove_path: Option<&str>,
+    config:     &TrainingConfig,
+    arch:       &str,
+    model_dir:  &str,
+    device:     B::Device,
+) where
+    B::InnerBackend: Backend,
+{
+    B::seed(&device, config.seed);
+    std::fs::create_dir_all(model_dir).expect("Could not create model directory");
+
+    let tokenizer_path = format!("{model_dir}/tokenizer.json");
+
+    // ── Data ──────────────────────────────────────────────────────────────────
+
+    let (train_ds, val_ds, embedding_matrix, class_names, vocab_size, embed_dim) =
+        if let Some(glove) = glove_path {
+            let corpus_words = collect_corpus_words(data_path);
+            let (glove_words, glove_vecs) = load_glove(glove, &corpus_words);
+            let embed_dim = glove_vecs[0].len();
+            let zeros = vec![0.0f32; embed_dim];
+            let mut matrix = vec![zeros.clone(), zeros];
+            matrix.extend(glove_vecs);
+
+            let tokenizer = if std::path::Path::new(&tokenizer_path).exists() {
+                println!("Loading tokenizer from {tokenizer_path}");
+                Tokenizer::load(&tokenizer_path)
+            } else {
+                println!("Building word-level tokenizer from GloVe vocab…");
+                if let Some(p) = std::path::Path::new(&tokenizer_path).parent() {
+                    std::fs::create_dir_all(p).ok();
+                }
+                let tok = Tokenizer::from_word_vocab(&glove_words, config.max_seq_len);
+                tok.save(&tokenizer_path);
+                tok
+            };
+
+            let (train_ds, val_ds, class_names) =
+                TextDataset::from_csv_tokenized(data_path, &tokenizer, config.val_ratio);
+            let vocab_size = matrix.len();
+            println!(
+                "Loaded: {} train / {} val — {} classes: {:?}",
+                train_ds.len(), val_ds.len(), class_names.len(), class_names,
+            );
+            (train_ds, val_ds, Some(matrix), class_names, vocab_size, embed_dim)
+        } else {
+            let (train_ds, val_ds, tokenizer, class_names) = TextDataset::from_csv(
+                data_path,
+                config.max_seq_len,
+                config.val_ratio,
+                config.vocab_size,
+                &tokenizer_path,
+            );
+            let vocab_size = tokenizer.vocab_size();
+            let embed_dim  = config.embed_dim;
+            println!(
+                "Loaded: {} train / {} val — {} classes: {:?}",
+                train_ds.len(), val_ds.len(), class_names.len(), class_names,
+            );
+            (train_ds, val_ds, None::<Vec<Vec<f32>>>, class_names, vocab_size, embed_dim)
+        };
+
+    let train_len = train_ds.len();
+    let val_len   = val_ds.len();
+
+    // ── Loaders ───────────────────────────────────────────────────────────────
+
+    let train_ds_eval = train_ds.clone();
+
+    let train_loader = DataLoaderBuilder::<B, _, _>::new(TextBatcher)
+        .batch_size(config.batch_size)
+        .shuffle(config.seed)
+        .num_workers(config.num_workers)
+        .set_device(device.clone())
+        .build(train_ds);
+
+    let val_loader = DataLoaderBuilder::<B::InnerBackend, _, _>::new(TextBatcher)
+        .batch_size(config.batch_size)
+        .num_workers(config.num_workers)
+        .set_device(device.clone())
+        .build(val_ds);
+
+    let train_eval_loader = DataLoaderBuilder::<B::InnerBackend, _, _>::new(TextBatcher)
+        .batch_size(config.batch_size)
+        .num_workers(config.num_workers)
+        .set_device(device.clone())
+        .build(train_ds_eval);
+
+    let train_batches = (train_len + config.batch_size - 1) / config.batch_size;
+    let val_batches   = (val_len   + config.batch_size - 1) / config.batch_size;
+
+    // ── Metrics ───────────────────────────────────────────────────────────────
+
+    let metrics_path = format!("{model_dir}/metrics.csv");
+    std::fs::write(&metrics_path, "epoch,train_loss,train_acc,val_loss,val_acc\n").unwrap();
+
+    // ── Model init (arch-specific) → shared epoch loop ────────────────────────
+
+    /// Load a model init'd on NdArray CPU then transfer to the training backend.
+    macro_rules! load_with_pretrained {
+        ($cfg:expr, $cpu_init:expr) => {{
+            let init_dir = format!("{model_dir}/.pretrained_init");
+            $cpu_init.save_file(
+                format!("{init_dir}/model"),
+                &burn::record::CompactRecorder::new(),
+            ).unwrap();
+            let m = $cfg
+                .init::<B>(&device)
+                .load_file(
+                    format!("{init_dir}/model"),
+                    &burn::record::CompactRecorder::new(),
+                    &device,
+                )
+                .unwrap();
+            std::fs::remove_dir_all(&init_dir).ok();
+            m
+        }};
+    }
+
+    match arch {
+        "kimcnn" => {
+            let mc = KimCnnConfig::new(vocab_size, class_names)
+                .with_embed_dim(embed_dim)
+                .with_num_filters(config.num_filters)
+                .with_dropout(config.dropout)
+                .with_freeze_embeddings(config.freeze_embeddings);
+
+            let model = if let Some(ref matrix) = embedding_matrix {
+                std::fs::create_dir_all(format!("{model_dir}/.pretrained_init")).unwrap();
+                let cpu = mc.init_with_embeddings::<NdArray>(&Default::default(), matrix);
+                load_with_pretrained!(mc, cpu)
+            } else {
+                mc.init::<B>(&device)
+            };
+
+            let mc2 = mc.clone();
+            run_epochs::<B, _, _>(
+                model, config.optimizer.init(), config,
+                &*train_loader, &*val_loader, &*train_eval_loader,
+                train_batches, val_batches, &metrics_path, model_dir,
+                move |m, dir| m.save_pretrained(&mc2, dir),
+            );
+        }
+
+        _ => {
+            // fasttext (default)
+            let mc = FastTextConfig::new(vocab_size, class_names)
+                .with_embed_dim(embed_dim)
+                .with_freeze_embeddings(config.freeze_embeddings);
+
+            let model = if let Some(ref matrix) = embedding_matrix {
+                std::fs::create_dir_all(format!("{model_dir}/.pretrained_init")).unwrap();
+                let cpu = mc.init_with_embeddings::<NdArray>(&Default::default(), matrix);
+                load_with_pretrained!(mc, cpu)
+            } else {
+                mc.init::<B>(&device)
+            };
+
+            let mc2 = mc.clone();
+            run_epochs::<B, _, _>(
+                model, config.optimizer.init(), config,
+                &*train_loader, &*val_loader, &*train_eval_loader,
+                train_batches, val_batches, &metrics_path, model_dir,
+                move |m, dir| m.save_pretrained(&mc2, dir),
+            );
+        }
     }
 
     println!("\nDone. Model saved → {model_dir}/");

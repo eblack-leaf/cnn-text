@@ -1,120 +1,171 @@
 # cnn-text
 
-Text classification with a small CNN trained in [Burn](https://burn.dev/) (Rust).
+Text classification trained in [Burn](https://burn.dev/) (Rust).
 Training backend is selectable at build time via Cargo features (default: GPU/WebGPU).
 Inference always runs on CPU.
 
-## Architecture
+## Architectures
+
+### FastText (default)
 
 ```
 tokens [B, L]
   → Embedding(vocab, E)
-  → Conv1d(kernel=3, filters=128) + ReLU
-  → Conv1d(kernel=5, filters=64)  + ReLU
-  → GlobalMaxPool
-  → Linear(64, num_classes)
+  → Mean over L
+  → Linear(E, num_classes)
 ```
 
-Two embedding modes:
-
-| Mode | Tokenizer | Embedding init | Typical val accuracy (AG News) |
-|---|---|---|---|
-| BPE | Trained on corpus | Random | ~90% |
-| GloVe | Word-level (GloVe vocab) | Pretrained vectors | ~93% |
-
-## Data format
-
-Headerless CSV, `label,text` per line:
+### Kim CNN (`--arch kimcnn`)
 
 ```
-World,Fed raises rates amid inflation concerns
-Sports,Liverpool beat Arsenal in extra time
+tokens [B, L]
+  → Embedding(vocab, E)
+  → Conv1d(k=3) → ReLU → GlobalMaxPool → [B, F] ┐
+  → Conv1d(k=4) → ReLU → GlobalMaxPool → [B, F] ├─ cat → [B, 3F]
+  → Conv1d(k=5) → ReLU → GlobalMaxPool → [B, F] ┘
+  → Dropout(0.5)
+  → Linear(3F, num_classes)
 ```
 
-Place it at `data/dataset.csv`. To download AG News:
+Inference auto-detects the architecture from the saved `config.json`.
+
+---
+
+## Results (AG News, 4 classes)
+
+| Arch | Embeddings | Val acc |
+|---|---|---|
+| FastText | BPE scratch | ~91% |
+| FastText | GloVe fine-tuned | ~92% |
+| FastText | GloVe frozen | ~89% |
+| Kim CNN | BPE scratch | TBD |
+| Kim CNN | GloVe fine-tuned | TBD |
+
+---
+
+## Setup
+
+### Dataset
 
 ```bash
 cargo run -- fetch-agnews
 ```
 
-To download GloVe (default: 100d; options: 50, 100, 200, 300):
+Writes `data/dataset.csv` — headerless `label,text` per line.
+
+### GloVe vectors (optional)
 
 ```bash
-cargo run -- fetch-glove           # → data/glove.6B.100d.txt
-cargo run -- fetch-glove 200       # → data/glove.6B.200d.txt
+cargo run -- fetch-glove
 ```
 
-Downloads the full 822 MB zip from Stanford, extracts the requested file, then deletes the zip.
+```bash
+cargo run -- fetch-glove 300
+```
+
+Downloads the Stanford 822 MB zip, extracts the requested dimension file, deletes the zip.
+Options: 50, 100 (default), 200, 300.
+
+---
 
 ## Train
 
+### FastText, BPE
+
 ```bash
-# BPE, random embeddings
 cargo run --release -- train <model>
+```
 
-# GloVe, fine-tune embeddings
+### FastText, GloVe
+
+```bash
 cargo run --release -- train <model> --glove data/glove.6B.100d.txt
+```
 
-# GloVe, frozen embeddings (faster, good when data is small)
-cargo run --release -- train <model> --glove data/glove.6B.100d.txt --freeze
+### Kim CNN, BPE
+
+```bash
+cargo run --release -- train <model> --arch kimcnn
+```
+
+### Kim CNN, GloVe
+
+```bash
+cargo run --release -- train <model> --arch kimcnn --glove data/glove.6B.100d.txt
+```
+
+### Frozen embeddings (any arch)
+
+```bash
+cargo run --release -- train <model> --arch kimcnn --glove data/glove.6B.100d.txt --freeze
 ```
 
 `<model>` names the output directory under `artifacts/`. Defaults to `default`.
 
-Hyperparameters are set in `main.rs` via `TrainingConfig`:
-
-| Field | Default | Description |
-|---|---|---|
-| `num_epochs` | 10 | Training epochs |
-| `batch_size` | 32 | Batch size |
-| `max_seq_len` | 128 | Tokens per sample (pad/truncate) |
-| `vocab_size` | 8192 | BPE vocabulary size (ignored with GloVe) |
-| `val_ratio` | 0.15 | Fraction held out for validation |
-| `learning_rate` | 1e-3 | Adam learning rate |
-| `embed_dim` | 64 | Embedding dimension (overridden by GloVe file) |
-| `conv1_filters` | 128 | Filters in first conv layer |
-| `conv2_filters` | 64 | Filters in second conv layer |
-| `freeze_embeddings` | false | Don't update embeddings during training |
-
-Each run saves to its own directory:
-
-```
-artifacts/<model>/
-  tokenizer.json        # vocab + padding config (BPE or word-level)
-  config.json           # arch hyperparams + class names
-  model.mpk             # latest weights (overwritten each epoch)
-  checkpoint/
-    model-1.mpk         # per-epoch checkpoints
-    model-2.mpk
-    ...
-```
+---
 
 ## Predict
 
 ```bash
-cargo run --release -- predict <model> "text to classify"
-# Sports  (94.3%)
+cargo run --release -- predict <model> "Fed raises rates as inflation fears grow"
 ```
 
-Prediction always runs on the latest saved weights (`model.mpk`). To roll back to an earlier epoch:
+```
+Business  (97.2%)
+```
+
+Works with both FastText and Kim CNN models — architecture is detected automatically.
+
+---
+
+## Hyperparameters
+
+Set in `main.rs` via `TrainingConfig`:
+
+| Field | Default | Description |
+|---|---|---|
+| `num_epochs` | 10 | Max training epochs |
+| `batch_size` | 32 | Batch size |
+| `max_seq_len` | 128 | Tokens per sample (pad/truncate) |
+| `vocab_size` | 8192 | BPE vocabulary size — ignored with GloVe |
+| `val_ratio` | 0.15 | Fraction held out for validation |
+| `learning_rate` | 1e-3 | Adam learning rate |
+| `embed_dim` | 100 | Embedding dimension — overridden by GloVe file |
+| `freeze_embeddings` | false | Freeze embedding weights during training |
+| `patience` | 3 | Early stopping patience (0 = disabled) |
+| `num_filters` | 128 | Kim CNN: filters per kernel size (total = 3×) |
+| `dropout` | 0.5 | Kim CNN: dropout after concatenation |
+
+---
+
+## Artifacts
+
+```
+artifacts/<model>/
+  config.json       # architecture hyperparams + class names
+  model.mpk         # best weights (only updated when val loss improves)
+  metrics.csv       # epoch,train_loss,train_acc,val_loss,val_acc
+  tokenizer.json    # BPE or word-level vocab
+  checkpoint/
+    model-1.mpk
+    model-2.mpk
+    ...
+```
+
+To roll back to a specific epoch:
 
 ```bash
 cp artifacts/<model>/checkpoint/model-3.mpk artifacts/<model>/model.mpk
 ```
 
+---
+
 ## Backend
 
-GPU (WebGPU) is the default. Switch to CPU with:
+GPU (WebGPU) is the default. Switch to CPU-only:
 
 ```bash
 cargo run --no-default-features -- train
 ```
 
-Or permanently in `Cargo.toml`:
-
-```toml
-[features]
-default = []   # drop "gpu"
-```
-
-Note: Inference always uses `NdArray` regardless of the feature flag.
+Inference always uses `NdArray` (CPU) regardless of the training backend.

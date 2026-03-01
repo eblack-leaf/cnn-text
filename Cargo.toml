@@ -12,7 +12,6 @@ ureq       = "3"
 ahash      = "0.8"
 indicatif  = "0.17"
 zip        = { version = "2", default-features = false, features = ["deflate"] }
-
 # ── Backend feature flags ────────────────────────────────────────────────────
 # ndarray is always present (Burn uses it internally for metric sync).
 # Enable the `gpu` feature (default) to also compile wgpu for training.

@@ -39,12 +39,17 @@ fn main() {
             println!("{class}  ({:.1}%)", confidence * 100.0);
         }
 
-        // cargo run -- train [<model>] [--glove <path>] [--freeze]
+        // cargo run -- train [<model>] [--arch fasttext|kimcnn] [--glove <path>] [--freeze]
         Some("train") | None => {
             let model = args.get(2)
                 .filter(|a| !a.starts_with("--"))
                 .map(String::as_str)
                 .unwrap_or("default");
+
+            let arch = args.windows(2)
+                .find(|w| w[0] == "--arch")
+                .map(|w| w[1].as_str())
+                .unwrap_or("fasttext");
 
             let glove = args.windows(2)
                 .find(|w| w[0] == "--glove")
@@ -63,13 +68,14 @@ fn main() {
                 "data/dataset.csv",
                 glove,
                 &config,
+                arch,
                 &format!("artifacts/{model}"),
                 Default::default(),
             );
         }
 
         Some(cmd) => eprintln!(
-            "Unknown command: {cmd}\nUsage: fetch-agnews | fetch-glove [dim] | train [model] | predict <model> \"<text>\""
+            "Unknown command: {cmd}\nUsage: fetch-agnews | fetch-glove [dim] | train [model] [--arch fasttext|kimcnn] | predict <model> \"<text>\""
         ),
     }
 }

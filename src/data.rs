@@ -150,6 +150,7 @@ pub struct TextSample {
     pub label:  i32,
 }
 
+#[derive(Clone)]
 pub struct TextDataset {
     samples: Vec<TextSample>,
 }
