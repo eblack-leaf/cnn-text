@@ -27,6 +27,34 @@ tokens [B, L]
   → Linear(3F, num_classes)
 ```
 
+### Bidirectional GRU (`--arch bigru`)
+
+```
+tokens [B, L]
+  → Embedding(vocab, E)
+  → GRU forward  → [B, L, H] ┐
+  → GRU backward → [B, L, H] ┘ cat → [B, L, 2H]
+  → Global max pool  [B, 2H]
+  → Dropout(0.5)
+  → Linear(2H, num_classes)
+```
+
+> **Note:** GRUs iterate sequentially over positions and are ~20× slower than CNN/FastText on GPU.
+
+### Tiny Transformer (`--arch transformer`)
+
+```
+tokens [B, L]
+  → TokenEmbedding(vocab, E) + PosEmbedding(max_len, E)  [B, L, E]
+  → TransformerEncoder (n_layers × MultiheadAttn + FFN)  [B, L, E]
+  → Mean pool over L                                      [B, E]
+  → Dropout(0.1)
+  → Linear(E, num_classes)
+```
+
+Fully parallel — no sequential loop. Attention is PAD-masked.
+`embed_dim` must be divisible by `num_heads` (default 100 / 4 = 25 ✓).
+
 Inference auto-detects the architecture from the saved `config.json`.
 
 ---
@@ -38,8 +66,9 @@ Inference auto-detects the architecture from the saved `config.json`.
 | FastText | BPE scratch | ~91% |
 | FastText | GloVe fine-tuned | ~92% |
 | FastText | GloVe frozen | ~89% |
-| Kim CNN | BPE scratch | TBD |
-| Kim CNN | GloVe fine-tuned | TBD |
+| Kim CNN | BPE scratch | ~91% |
+| Kim CNN | GloVe fine-tuned | ~93% |
+| Tiny Transformer | GloVe fine-tuned | TBD |
 
 ---
 
@@ -56,11 +85,8 @@ Writes `data/dataset.csv` — headerless `label,text` per line.
 ### GloVe vectors (optional)
 
 ```bash
-cargo run -- fetch-glove
-```
-
-```bash
-cargo run -- fetch-glove 300
+cargo run -- fetch-glove          # 100d (default)
+cargo run -- fetch-glove 300      # 300d
 ```
 
 Downloads the Stanford 822 MB zip, extracts the requested dimension file, deletes the zip.
@@ -82,16 +108,22 @@ cargo run --release -- train <model>
 cargo run --release -- train <model> --glove data/glove.6B.100d.txt
 ```
 
-### Kim CNN, BPE
-
-```bash
-cargo run --release -- train <model> --arch kimcnn
-```
-
 ### Kim CNN, GloVe
 
 ```bash
 cargo run --release -- train <model> --arch kimcnn --glove data/glove.6B.100d.txt
+```
+
+### Tiny Transformer, GloVe
+
+```bash
+cargo run --release -- train <model> --arch transformer --glove data/glove.6B.100d.txt
+```
+
+### Tiny Transformer, BPE
+
+```bash
+cargo run --release -- train <model> --arch transformer
 ```
 
 ### Frozen embeddings (any arch)
@@ -114,7 +146,7 @@ cargo run --release -- predict <model> "Fed raises rates as inflation fears grow
 Business  (97.2%)
 ```
 
-Works with both FastText and Kim CNN models — architecture is detected automatically.
+Architecture is detected automatically from the saved `config.json`.
 
 ---
 
@@ -124,17 +156,22 @@ Set in `main.rs` via `TrainingConfig`:
 
 | Field | Default | Description |
 |---|---|---|
-| `num_epochs` | 10 | Max training epochs |
+| `num_epochs` | 20 | Max training epochs |
 | `batch_size` | 32 | Batch size |
 | `max_seq_len` | 128 | Tokens per sample (pad/truncate) |
 | `vocab_size` | 8192 | BPE vocabulary size — ignored with GloVe |
 | `val_ratio` | 0.15 | Fraction held out for validation |
-| `learning_rate` | 1e-3 | Adam learning rate |
+| `learning_rate` | 1e-3 | AdamW learning rate |
 | `embed_dim` | 100 | Embedding dimension — overridden by GloVe file |
 | `freeze_embeddings` | false | Freeze embedding weights during training |
 | `patience` | 3 | Early stopping patience (0 = disabled) |
 | `num_filters` | 128 | Kim CNN: filters per kernel size (total = 3×) |
-| `dropout` | 0.5 | Kim CNN: dropout after concatenation |
+| `hidden_dim` | 128 | BiGRU: hidden size per direction |
+| `dropout` | 0.5 | Kim CNN / BiGRU: dropout before classifier |
+| `num_heads` | 4 | Transformer: attention heads (`embed_dim` must be divisible) |
+| `num_layers` | 2 | Transformer: encoder layers |
+| `d_ff` | 256 | Transformer: FFN hidden dim |
+| `attn_dropout` | 0.1 | Transformer: dropout inside layers and before classifier |
 
 ---
 

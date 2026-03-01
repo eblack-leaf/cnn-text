@@ -5,7 +5,7 @@ use burn::{
     config::Config,
     prelude::Module,
     data::dataloader::{DataLoader, DataLoaderBuilder},
-    optim::{AdamConfig, GradientsParams, Optimizer},
+    optim::{AdamWConfig, GradientsParams, Optimizer},
     tensor::backend::{AutodiffBackend, Backend},
     module::AutodiffModule,
     tensor::ElementConversion,
@@ -14,14 +14,14 @@ use burn::data::dataset::Dataset;
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::{
     data::{TextBatch, TextBatcher, TextDataset, Tokenizer},
-    model::{Classify, FastTextConfig, KimCnnConfig},
+    model::{BiGruConfig, Classify, FastTextConfig, KimCnnConfig, TinyTransformerConfig},
 };
 
 // ── Training configuration ────────────────────────────────────────────────────
 
 #[derive(Config, Debug)]
 pub struct TrainingConfig {
-    pub optimizer: AdamConfig,
+    pub optimizer: AdamWConfig,
     #[config(default = 10)]
     pub num_epochs: usize,
     #[config(default = 32)]
@@ -53,9 +53,27 @@ pub struct TrainingConfig {
     /// Filters per kernel size (total output dim = num_filters × 3).
     #[config(default = 128)]
     pub num_filters: usize,
-    /// Dropout probability after concatenation.
+    // ── BiGRU specific ────────────────────────────────────────────────────────
+    /// Hidden size per GRU direction (classifier input = hidden_dim × 2).
+    #[config(default = 128)]
+    pub hidden_dim: usize,
+    // ── Shared ────────────────────────────────────────────────────────────────
+    /// Dropout probability (Kim CNN: after concat; BiGRU: after max pool).
     #[config(default = 0.5)]
     pub dropout: f64,
+    // ── Tiny Transformer specific ─────────────────────────────────────────────
+    /// Attention heads (embed_dim must be divisible by num_heads).
+    #[config(default = 4)]
+    pub num_heads: usize,
+    /// Number of transformer encoder layers.
+    #[config(default = 2)]
+    pub num_layers: usize,
+    /// FFN hidden dim inside each transformer layer.
+    #[config(default = 256)]
+    pub d_ff: usize,
+    /// Dropout used inside transformer layers and before the classifier head.
+    #[config(default = 0.1)]
+    pub attn_dropout: f64,
 }
 
 // ── GloVe helpers ─────────────────────────────────────────────────────────────
@@ -403,6 +421,56 @@ pub fn train<B: AutodiffBackend>(
                 &*train_loader, &*val_loader, &*train_eval_loader,
                 train_batches, val_batches, &metrics_path, model_dir,
                 move |m, dir| m.save_pretrained(&mc2, dir),
+            );
+        }
+
+        "bigru" => {
+            let bc = BiGruConfig::new(vocab_size, class_names)
+                .with_embed_dim(embed_dim)
+                .with_hidden_dim(config.hidden_dim)
+                .with_dropout(config.dropout)
+                .with_freeze_embeddings(config.freeze_embeddings);
+
+            let model = if let Some(ref matrix) = embedding_matrix {
+                std::fs::create_dir_all(format!("{model_dir}/.pretrained_init")).unwrap();
+                let cpu = bc.init_with_embeddings::<NdArray>(&Default::default(), matrix);
+                load_with_pretrained!(bc, cpu)
+            } else {
+                bc.init::<B>(&device)
+            };
+
+            let bc2 = bc.clone();
+            run_epochs::<B, _, _>(
+                model, config.optimizer.init(), config,
+                &*train_loader, &*val_loader, &*train_eval_loader,
+                train_batches, val_batches, &metrics_path, model_dir,
+                move |m, dir| m.save_pretrained(&bc2, dir),
+            );
+        }
+
+        "transformer" => {
+            let tc = TinyTransformerConfig::new(vocab_size, class_names, config.max_seq_len)
+                .with_embed_dim(embed_dim)
+                .with_num_heads(config.num_heads)
+                .with_num_layers(config.num_layers)
+                .with_d_ff(config.d_ff)
+                .with_dropout(config.attn_dropout)
+                .with_freeze_embeddings(config.freeze_embeddings);
+
+            let model = if let Some(ref matrix) = embedding_matrix {
+                std::fs::create_dir_all(format!("{model_dir}/.pretrained_init")).unwrap();
+                let cpu = tc.init_with_embeddings::<NdArray>(&Default::default(), matrix);
+                load_with_pretrained!(tc, cpu)
+            } else {
+                tc.init::<B>(&device)
+            };
+
+            let tc2 = tc.clone();
+            run_epochs::<B, _, _>(
+                model, config.optimizer.init(), config,
+                &*train_loader, &*val_loader, &*train_eval_loader,
+                train_batches, val_batches, &metrics_path, model_dir,
+                move |m, dir| m.save_pretrained(&tc2, dir),
             );
         }
 

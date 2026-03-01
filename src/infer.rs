@@ -3,7 +3,7 @@ use burn::{
     tensor::{Int, Tensor, TensorData, activation::softmax},
 };
 
-use crate::{data::Tokenizer, model::{FastText, KimCnn}};
+use crate::{data::Tokenizer, model::{BiGru, FastText, KimCnn, TinyTransformer}};
 
 type B = NdArray;
 
@@ -32,6 +32,14 @@ pub fn predict(text: &str, model_dir: &str) -> (String, f32) {
     let (logits, class_names) = match arch {
         "kimcnn" => {
             let (model, cfg) = KimCnn::<B>::from_pretrained(model_dir, &device);
+            (model.forward(tensor), cfg.class_names)
+        }
+        "bigru" => {
+            let (model, cfg) = BiGru::<B>::from_pretrained(model_dir, &device);
+            (model.forward(tensor), cfg.class_names)
+        }
+        "transformer" => {
+            let (model, cfg) = TinyTransformer::<B>::from_pretrained(model_dir, &device);
             (model.forward(tensor), cfg.class_names)
         }
         _ => {

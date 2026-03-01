@@ -7,7 +7,7 @@ mod model;
 mod training;
 
 use burn::backend::Autodiff;
-use burn::optim::AdamConfig;
+use burn::optim::AdamWConfig;
 use training::{TrainingConfig, train};
 
 #[cfg(feature = "gpu")]
@@ -57,8 +57,8 @@ fn main() {
 
             let freeze = args.iter().any(|a| a == "--freeze");
 
-            let config = TrainingConfig::new(AdamConfig::new())
-                .with_num_epochs(10)
+            let config = TrainingConfig::new(AdamWConfig::new().with_weight_decay(0.01))
+                .with_num_epochs(20)
                 .with_batch_size(32)
                 .with_max_seq_len(128)
                 .with_vocab_size(8192)
@@ -75,7 +75,7 @@ fn main() {
         }
 
         Some(cmd) => eprintln!(
-            "Unknown command: {cmd}\nUsage: fetch-agnews | fetch-glove [dim] | train [model] [--arch fasttext|kimcnn] | predict <model> \"<text>\""
+            "Unknown command: {cmd}\nUsage: fetch-agnews | fetch-glove [dim] | train [model] [--arch fasttext|kimcnn|bigru|transformer] | predict <model> \"<text>\""
         ),
     }
 }
