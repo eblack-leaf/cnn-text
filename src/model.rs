@@ -31,12 +31,18 @@ pub trait Classify<B: Backend> {
 //     → mean over L [B, E]
 //     → Linear [B, num_classes]
 
+/// Hash prime for bigram IDs. Small enough to avoid i32 overflow for vocab ≤ 60k.
+const BIGRAM_PRIME: i32 = 9973;
+
 #[derive(Config, Debug)]
 pub struct FastTextConfig {
     pub vocab_size:        usize,
     pub class_names:       Vec<String>,
     #[config(default = 100)]
     pub embed_dim:         usize,
+    /// Number of bigram hash buckets. 0 = no bigrams (backwards-compatible default).
+    #[config(default = 0)]
+    pub bigram_buckets:    usize,
     #[config(default = false)]
     pub freeze_embeddings: bool,
 }
@@ -44,11 +50,20 @@ pub struct FastTextConfig {
 impl FastTextConfig {
     pub fn num_classes(&self) -> usize { self.class_names.len() }
 
+    fn make_bigrams<B: Backend>(&self, embed_dim: usize, device: &B::Device) -> Option<Embedding<B>> {
+        if self.bigram_buckets > 0 {
+            Some(EmbeddingConfig::new(self.bigram_buckets, embed_dim).init(device))
+        } else {
+            None
+        }
+    }
+
     pub fn init<B: Backend>(&self, device: &B::Device) -> FastText<B> {
         let embedding = EmbeddingConfig::new(self.vocab_size, self.embed_dim).init(device);
         let embedding = if self.freeze_embeddings { embedding.no_grad() } else { embedding };
         FastText {
             embedding,
+            bigrams: self.make_bigrams::<B>(self.embed_dim, device),
             classifier: LinearConfig::new(self.embed_dim, self.num_classes()).init(device),
         }
     }
@@ -71,6 +86,7 @@ impl FastTextConfig {
         let embedding = if self.freeze_embeddings { embedding.no_grad() } else { embedding };
         FastText {
             embedding,
+            bigrams: self.make_bigrams::<B>(embed_dim, device),
             classifier: LinearConfig::new(embed_dim, self.num_classes()).init(device),
         }
     }
@@ -79,13 +95,29 @@ impl FastTextConfig {
 #[derive(Module, Debug)]
 pub struct FastText<B: Backend> {
     embedding:  Embedding<B>,
+    /// Bigram hash table. None for models trained without bigrams.
+    bigrams:    Option<Embedding<B>>,
     classifier: Linear<B>,
 }
 
 impl<B: Backend> FastText<B> {
     pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 2> {
-        let x = self.embedding.forward(tokens); // [B, L, E]
-        let x = x.mean_dim(1).squeeze::<2>();   // [B, E]
+        let [batch_size, seq_len] = tokens.dims();
+        let tok_emb = self.embedding.forward(tokens.clone()); // [B, L, E]
+
+        let x = if let Some(bigrams) = &self.bigrams {
+            // bigram_id = (tok_i * PRIME + tok_{i+1}).abs() % n_buckets
+            let n = bigrams.weight.val().dims()[0] as i32;
+            let left  = tokens.clone().slice([0..batch_size, 0..seq_len - 1]);
+            let right = tokens.slice([0..batch_size, 1..seq_len]);
+            let ids   = left.mul_scalar(BIGRAM_PRIME).add(right).abs().remainder_scalar(n);
+            let big_emb = bigrams.forward(ids);                // [B, L-1, E]
+            Tensor::cat(vec![tok_emb, big_emb], 1)            // [B, 2L-1, E]
+                .mean_dim(1).squeeze::<2>()                    // [B, E]
+        } else {
+            tok_emb.mean_dim(1).squeeze::<2>()                 // [B, E]
+        };
+
         self.classifier.forward(x)
     }
 

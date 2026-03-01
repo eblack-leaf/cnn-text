@@ -63,12 +63,21 @@ Inference auto-detects the architecture from the saved `config.json`.
 
 | Arch | Embeddings | Val acc |
 |---|---|---|
-| FastText | BPE scratch | ~91% |
-| FastText | GloVe fine-tuned | ~92% |
-| FastText | GloVe frozen | ~89% |
-| Kim CNN | BPE scratch | ~91% |
 | Kim CNN | GloVe fine-tuned | ~93% |
-| Tiny Transformer | GloVe fine-tuned | TBD |
+| FastText + bigrams | GloVe fine-tuned | 92.3% |
+| Tiny Transformer | GloVe frozen | 92.2% |
+| Tiny Transformer | GloVe fine-tuned | 92.2% |
+| FastText + bigrams | BPE scratch | 92.1% |
+| FastText | GloVe fine-tuned | ~92% |
+| Kim CNN | BPE scratch | ~91% |
+| FastText | BPE scratch | ~91% |
+| FastText | GloVe frozen | ~89% |
+
+**Takeaways:**
+- Kim CNN's max-pool + multi-kernel ensemble is the best bang-for-buck on short text
+- Bigrams add ~+1% to FastText regardless of embedding source; GloVe on top adds little extra
+- Transformer (2 layers, 100d) can't beat CNN when training from scratch on 100k samples — needs pre-training to show its advantage
+- ~93% appears to be the practical ceiling for small models without pre-trained weights; SOTA is ~95.5% with large pre-trained transformers
 
 ---
 
@@ -102,7 +111,21 @@ Options: 50, 100 (default), 200, 300.
 cargo run --release -- train <model>
 ```
 
+### FastText + bigrams, BPE
+
+```bash
+cargo run --release -- train <model>
+```
+
+*(bigrams are on by default — set `bigram_buckets = 0` in `main.rs` to disable)*
+
 ### FastText, GloVe
+
+```bash
+cargo run --release -- train <model> --glove data/glove.6B.100d.txt
+```
+
+### FastText + bigrams, GloVe
 
 ```bash
 cargo run --release -- train <model> --glove data/glove.6B.100d.txt
@@ -165,6 +188,7 @@ Set in `main.rs` via `TrainingConfig`:
 | `embed_dim` | 100 | Embedding dimension — overridden by GloVe file |
 | `freeze_embeddings` | false | Freeze embedding weights during training |
 | `patience` | 3 | Early stopping patience (0 = disabled) |
+| `bigram_buckets` | 100_000 | FastText: bigram hash table size (0 = disabled) |
 | `num_filters` | 128 | Kim CNN: filters per kernel size (total = 3×) |
 | `hidden_dim` | 128 | BiGRU: hidden size per direction |
 | `dropout` | 0.5 | Kim CNN / BiGRU: dropout before classifier |

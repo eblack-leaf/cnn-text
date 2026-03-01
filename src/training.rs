@@ -49,6 +49,9 @@ pub struct TrainingConfig {
     /// Stop if val loss hasn't improved for this many epochs. 0 = disabled.
     #[config(default = 3)]
     pub patience: usize,
+    /// FastText: bigram hash buckets. 0 = no bigrams.
+    #[config(default = 100_000)]
+    pub bigram_buckets: usize,
     // ── Kim CNN specific ──────────────────────────────────────────────────────
     /// Filters per kernel size (total output dim = num_filters × 3).
     #[config(default = 128)]
@@ -478,6 +481,7 @@ pub fn train<B: AutodiffBackend>(
             // fasttext (default)
             let mc = FastTextConfig::new(vocab_size, class_names)
                 .with_embed_dim(embed_dim)
+                .with_bigram_buckets(config.bigram_buckets)
                 .with_freeze_embeddings(config.freeze_embeddings);
 
             let model = if let Some(ref matrix) = embedding_matrix {
