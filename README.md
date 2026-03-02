@@ -61,22 +61,39 @@ Inference auto-detects the architecture from the saved `config.json`.
 
 ## Results (AG News, 4 classes)
 
-| Arch | Embeddings | Val acc |
-|---|---|---|
-| Kim CNN | GloVe fine-tuned | ~93% |
-| FastText + bigrams | GloVe fine-tuned | 92.3% |
-| Tiny Transformer | GloVe frozen | 92.2% |
-| Tiny Transformer | GloVe fine-tuned | 92.2% |
-| FastText + bigrams | BPE scratch | 92.1% |
-| FastText | GloVe fine-tuned | ~92% |
-| Kim CNN | BPE scratch | ~91% |
-| FastText | BPE scratch | ~91% |
-| FastText | GloVe frozen | ~89% |
+| Arch | Embeddings | Val acc | s/epoch (GPU) |
+|---|---|---|---|
+| Kim CNN | GloVe 100d fine-tuned | 92.8% | — |
+| BiGRU | GloVe 300d fine-tuned | 92.7% | — |
+| Tiny Transformer | GloVe 300d fine-tuned (warmup + grad-clip) | 92.6% | ~24s |
+| FastText + bigrams | GloVe 100d fine-tuned | 92.3% | — |
+| FastText | GloVe 100d fine-tuned | 92.3% | — |
+| FastText + bigrams | BPE scratch | 92.1% | — |
+| Kim CNN | BPE scratch | ~91% | — |
+| FastText | BPE scratch | ~91% | — |
+| FastText | GloVe 100d frozen | ~89% | — |
+
+s/epoch measured on GPU (WebGPU backend); only logged for runs that print it to console — not recorded in `metrics.csv`.
+
+### Model size
+
+GloVe-vocab runs (59 828 words). Embedding params = token table (+ bigram table for FastText+bigrams).
+
+| Arch | Embed dim | Model params | Embedding params | Total |
+|---|---|---|---|---|
+| Tiny Transformer | 300d | 1.07 M | 17.95 M | ~19.0 M |
+| BiGRU | 300d | 0.33 M | 17.95 M | ~18.3 M |
+| FastText + bigrams | 100d | < 0.01 M | 15.98 M | ~16.0 M |
+| Tiny Transformer | 100d | 0.20 M | 5.98 M | ~6.2 M |
+| Kim CNN | 100d | 0.16 M | 5.98 M | ~6.1 M |
+| FastText | 100d | < 0.01 M | 5.98 M | ~6.0 M |
+
+The embedding table is almost everything — the actual model is tiny. Kim CNN's encoder (3 Conv1d kernels) is only 154 k params; the Transformer's 2-layer encoder adds 1 M at 300d but still can't beat the CNN.
 
 **Takeaways:**
-- Kim CNN's max-pool + multi-kernel ensemble is the best bang-for-buck on short text
-- Bigrams add ~+1% to FastText regardless of embedding source; GloVe on top adds little extra
-- Transformer (2 layers, 100d) can't beat CNN when training from scratch on 100k samples — needs pre-training to show its advantage
+- Kim CNN is the best bang-for-buck: matches or beats everything else at 6 M params and fast parallel inference
+- BiGRU and the 300d Transformer are 3× larger for tiny accuracy gains and iterate sequentially (BiGRU ~20× slower per epoch than CNN/FastText)
+- Transformer needs warmup + grad-clip to train stably with GloVe; even then it only ties CNN with 3× the parameters
 - ~93% appears to be the practical ceiling for small models without pre-trained weights; SOTA is ~95.5% with large pre-trained transformers
 
 ---

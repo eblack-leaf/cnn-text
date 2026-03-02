@@ -119,7 +119,9 @@ impl<B: Backend> FastText<B> {
             let ids   = left.mul_scalar(BIGRAM_PRIME).add(right).abs().remainder_scalar(n);
             let big_emb = bigrams.forward(ids);                          // [B, L-1, E]
 
-            let big_mask_2d = mask_2d.clone().slice([0..batch_size, 0..seq_len - 1]); // [B, L-1]
+            let left_mask   = mask_2d.clone().slice([0..batch_size, 0..seq_len - 1]);
+            let right_mask  = mask_2d.clone().slice([0..batch_size, 1..seq_len]);
+            let big_mask_2d = left_mask * right_mask;                          // [B, L-1]
             let big_mask_3d = big_mask_2d.clone().unsqueeze_dim::<3>(2);      // [B, L-1, 1]
 
             let emb = Tensor::cat(

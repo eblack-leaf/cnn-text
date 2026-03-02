@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::time::Instant;
 
 use burn::{
     backend::NdArray,
@@ -77,6 +78,9 @@ pub struct TrainingConfig {
     /// Dropout used inside transformer layers and before the classifier head.
     #[config(default = 0.1)]
     pub attn_dropout: f64,
+    /// Linear LR warmup steps (0 = disabled). LR ramps from 0 → learning_rate over this many steps.
+    #[config(default = 0)]
+    pub warmup_steps: usize,
 }
 
 // ── GloVe helpers ─────────────────────────────────────────────────────────────
@@ -124,6 +128,23 @@ pub fn load_glove(
     (words, vecs)
 }
 
+// ── LR warmup ─────────────────────────────────────────────────────────────────
+
+fn fmt_duration(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    if s >= 3600 { format!("{}h{:02}m", s / 3600, (s % 3600) / 60) }
+    else if s >= 60 { format!("{}m{:02}s", s / 60, s % 60) }
+    else { format!("{s}s") }
+}
+
+fn warmup_lr(base_lr: f64, step: usize, warmup_steps: usize) -> f64 {
+    if warmup_steps > 0 && step <= warmup_steps {
+        base_lr * step as f64 / warmup_steps as f64
+    } else {
+        base_lr
+    }
+}
+
 // ── Shared epoch loop ─────────────────────────────────────────────────────────
 //
 // Generic over model type M. The only arch-specific part — `save_best` — is
@@ -158,17 +179,21 @@ fn run_epochs<B, M, O>(
 
     let mut best_val_loss = f64::MAX;
     let mut no_improve    = 0usize;
+    let mut global_step   = 0usize;
+    let train_start       = Instant::now();
 
     for epoch in 1..=config.num_epochs {
 
         // ── Train ─────────────────────────────────────────────────────────────
 
+        let epoch_start = Instant::now();
         let pb = ProgressBar::new(train_batches as u64);
         pb.set_style(train_style.clone());
         pb.set_prefix(format!("Epoch {:>2}/{} train", epoch, config.num_epochs));
         let (mut sum_loss, mut n_correct, mut n_total) = (0.0f64, 0usize, 0usize);
 
         for batch in train_loader.iter() {
+            global_step += 1;
             let batch_len = batch.tokens.dims()[0];
             let out = model.forward_classification(batch.tokens, batch.labels);
 
@@ -178,13 +203,17 @@ fn run_epochs<B, M, O>(
                 .into_scalar().elem::<i64>() as usize;
             n_total += batch_len;
 
+            let effective_lr = warmup_lr(config.learning_rate, global_step, config.warmup_steps);
             let grads = GradientsParams::from_grads(out.loss.backward(), &model);
-            model = optimizer.step(config.learning_rate, model, grads);
+            model = optimizer.step(effective_lr, model, grads);
 
+            let sps = (pb.position() + 1) as f64
+                / epoch_start.elapsed().as_secs_f64().max(1e-9);
             pb.set_message(format!(
-                "loss={:.3}  acc={:.1}%",
-                sum_loss / (pb.position() as f64),
+                "loss={:.3}  acc={:.1}%  {:.1}it/s",
+                sum_loss / (pb.position() + 1) as f64,
                 100.0 * n_correct as f64 / n_total as f64,
+                sps,
             ));
             pb.inc(1);
         }
@@ -223,6 +252,17 @@ fn run_epochs<B, M, O>(
         let val_acc  = 100.0 * vn_correct as f64 / vn_total as f64;
         vpb.finish_with_message(format!("loss={val_loss:.3}  acc={val_acc:.1}%"));
 
+        // ── Timing ────────────────────────────────────────────────────────────
+
+        let epoch_secs = epoch_start.elapsed();
+        let avg_epoch  = train_start.elapsed() / epoch as u32;
+        let eta        = avg_epoch * (config.num_epochs - epoch) as u32;
+        println!(
+            "  [{:.0}s/epoch | ~{} remaining]",
+            epoch_secs.as_secs_f64(),
+            fmt_duration(eta),
+        );
+
         // ── Post-epoch train eval (same weights as val, val_batches worth) ────
 
         let (mut te_loss, mut te_correct, mut te_total, mut te_n) =
@@ -254,7 +294,7 @@ fn run_epochs<B, M, O>(
 
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new().append(true).open(metrics_path).unwrap();
-        writeln!(f, "{epoch},{train_eval_loss:.4},{train_eval_acc:.2},{val_loss:.4},{val_acc:.2}").unwrap();
+        writeln!(f, "{epoch},{train_eval_loss:.4},{train_eval_acc:.2},{val_loss:.4},{val_acc:.2},{:.1}", epoch_secs.as_secs_f64()).unwrap();
 
         // ── Early stopping / best model ───────────────────────────────────────
 
@@ -377,7 +417,7 @@ pub fn train<B: AutodiffBackend>(
     // ── Metrics ───────────────────────────────────────────────────────────────
 
     let metrics_path = format!("{model_dir}/metrics.csv");
-    std::fs::write(&metrics_path, "epoch,train_loss,train_acc,val_loss,val_acc\n").unwrap();
+    std::fs::write(&metrics_path, "epoch,train_loss,train_acc,val_loss,val_acc,epoch_secs\n").unwrap();
 
     // ── Model init (arch-specific) → shared epoch loop ────────────────────────
 
@@ -479,9 +519,18 @@ pub fn train<B: AutodiffBackend>(
 
         _ => {
             // fasttext (default)
+            let effective_bigram_buckets = if config.bigram_buckets > 0 && embedding_matrix.is_none() {
+                eprintln!(
+                    "Warning: bigram_buckets ignored — bigrams are word-level features and \
+                     require word-level (GloVe) tokenization. Pass --glove to enable them."
+                );
+                0
+            } else {
+                config.bigram_buckets
+            };
             let mc = FastTextConfig::new(vocab_size, class_names)
                 .with_embed_dim(embed_dim)
-                .with_bigram_buckets(config.bigram_buckets)
+                .with_bigram_buckets(effective_bigram_buckets)
                 .with_freeze_embeddings(config.freeze_embeddings);
 
             let model = if let Some(ref matrix) = embedding_matrix {

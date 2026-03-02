@@ -7,6 +7,7 @@ mod model;
 mod training;
 
 use burn::backend::Autodiff;
+use burn::grad_clipping::GradientClippingConfig;
 use burn::optim::AdamWConfig;
 use training::{TrainingConfig, train};
 
@@ -57,12 +58,25 @@ fn main() {
 
             let freeze = args.iter().any(|a| a == "--freeze");
 
-            let config = TrainingConfig::new(AdamWConfig::new().with_weight_decay(0.01))
+            // Transformer needs a lower LR and warmup to train stably.
+            let (lr, warmup_steps) = if arch == "transformer" {
+                (1e-4, 500)
+            } else {
+                (1e-3, 0)
+            };
+
+            let optimizer = AdamWConfig::new()
+                .with_weight_decay(0.01)
+                .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)));
+
+            let config = TrainingConfig::new(optimizer)
                 .with_num_epochs(20)
-                .with_batch_size(32)
+                .with_batch_size(128)
                 .with_max_seq_len(128)
                 .with_vocab_size(8192)
-                .with_freeze_embeddings(freeze);
+                .with_freeze_embeddings(freeze)
+                .with_learning_rate(lr)
+                .with_warmup_steps(warmup_steps);
 
             train::<AutodiffBackend>(
                 "data/dataset.csv",
