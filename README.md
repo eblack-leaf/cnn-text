@@ -128,12 +128,6 @@ Options: 50, 100 (default), 200, 300.
 cargo run --release -- train <model>
 ```
 
-### FastText + bigrams, BPE
-
-```bash
-cargo run --release -- train <model>
-```
-
 *(bigrams are on by default — set `bigram_buckets = 0` in `main.rs` to disable)*
 
 ### FastText, GloVe
