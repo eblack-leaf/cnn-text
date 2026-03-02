@@ -103,6 +103,12 @@ pub struct FastText<B: Backend> {
 impl<B: Backend> FastText<B> {
     pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 2> {
         let [batch_size, seq_len] = tokens.dims();
+
+        // mask_2d: [B, L] float — 1.0 for real tokens, 0.0 for PAD (id=0)
+        let mask_2d = tokens.clone().not_equal_elem(0).float();
+        // mask_3d: [B, L, 1] — for broadcasting against embeddings [B, L, E]
+        let mask_3d = mask_2d.clone().unsqueeze_dim::<3>(2);
+
         let tok_emb = self.embedding.forward(tokens.clone()); // [B, L, E]
 
         let x = if let Some(bigrams) = &self.bigrams {
@@ -111,11 +117,21 @@ impl<B: Backend> FastText<B> {
             let left  = tokens.clone().slice([0..batch_size, 0..seq_len - 1]);
             let right = tokens.slice([0..batch_size, 1..seq_len]);
             let ids   = left.mul_scalar(BIGRAM_PRIME).add(right).abs().remainder_scalar(n);
-            let big_emb = bigrams.forward(ids);                // [B, L-1, E]
-            Tensor::cat(vec![tok_emb, big_emb], 1)            // [B, 2L-1, E]
-                .mean_dim(1).squeeze::<2>()                    // [B, E]
+            let big_emb = bigrams.forward(ids);                          // [B, L-1, E]
+
+            let big_mask_2d = mask_2d.clone().slice([0..batch_size, 0..seq_len - 1]); // [B, L-1]
+            let big_mask_3d = big_mask_2d.clone().unsqueeze_dim::<3>(2);      // [B, L-1, 1]
+
+            let emb = Tensor::cat(
+                vec![tok_emb * mask_3d, big_emb * big_mask_3d], 1,       // [B, 2L-1, E]
+            );
+            // counts: sum [B, L] + sum [B, L-1] → [B, 1] + [B, 1] = [B, 1]
+            let counts = (mask_2d.clone().sum_dim(1) + big_mask_2d.sum_dim(1)).clamp_min(1.0);
+            emb.sum_dim(1).squeeze::<2>() / counts                        // [B, E]
         } else {
-            tok_emb.mean_dim(1).squeeze::<2>()                 // [B, E]
+            // counts: sum [B, L] → [B, 1]
+            let counts = mask_2d.sum_dim(1).clamp_min(1.0);              // [B, 1]
+            (tok_emb * mask_3d).sum_dim(1).squeeze::<2>() / counts       // [B, E]
         };
 
         self.classifier.forward(x)
