@@ -17,7 +17,7 @@ dataset_kind = "agnews"   # agnews | sms | imdb
 
 # ── Fixed training hyperparams ────────────────────────────────────────────────
 num_epochs     = 15       # max epochs per run (early stopping may cut short)
-batch_size     = 512
+batch_size     = 2048
 max_seq_len    = 64       # AG News avg ~35 tokens; 64 is sufficient
 val_ratio      = 0.15
 vocab_size     = 16384    # BPE vocab size (only used for BPE embed entries)
@@ -50,4 +50,4 @@ arch          = "cnn-text"
 embed         = [32, 64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
 num_filters   = [64, 128]
 dropout       = [0.3, 0.5]
-learning_rate = [2e-3, 1e-3]
+learning_rate = [4e-3, 2e-3]
