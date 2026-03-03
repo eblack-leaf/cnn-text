@@ -529,7 +529,11 @@ where
     // ── Write CSV ─────────────────────────────────────────────────────────────
 
     std::fs::create_dir_all(format!("artifacts/{}", cfg.dataset_kind)).ok();
-    let results_path = format!("artifacts/{}/sweep_results.csv", cfg.dataset_kind);
+    let exp_stem = std::path::Path::new(config_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("sweep");
+    let results_path = format!("artifacts/{}/{exp_stem}.csv", cfg.dataset_kind);
     let mut csv = concat!(
         "dataset,name,arch,embed_source,embed_dim,bigram_buckets,",
         "dropout,attn_dropout,learning_rate,",
