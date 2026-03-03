@@ -362,7 +362,7 @@ pub fn count_params(
             let conv3   = num_filters * embed_dim * 3 + num_filters;
             let conv4   = num_filters * embed_dim * 4 + num_filters;
             let conv5   = num_filters * embed_dim * 5 + num_filters;
-            let attn    = num_filters + 1;             // Linear(F, 1): weight + bias
+            let attn    = 3 * (num_filters + 1);       // three Linear(F, 1) scorers
             let cls     = num_filters * 3 * num_classes + num_classes;
             pos_emb + conv3 + conv4 + conv5 + attn + cls
         }

@@ -12,7 +12,7 @@ dataset_kind = "imdb"
 
 # ── Fixed training params ─────────────────────────────────────────────────────
 num_epochs  = 20      # binary task converges faster than 4-class
-batch_size  = 64      # smaller batch to fit longer sequences in memory
+batch_size  = 128     # smaller batch to fit longer sequences in memory
 max_seq_len = 300     # covers ~90% of reviews
 val_ratio   = 0.15
 vocab_size  = 16384
@@ -35,16 +35,16 @@ dropout      = 0.5
 arch           = "fasttext"
 embed          = [64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
 bigram_buckets = [0, 100000]
-learning_rate  = [1e-3, 5e-4]
+learning_rate  = [2e-3, 1e-3]
 
 [[runs]]
 arch          = "kimcnn"
 embed         = [64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
 dropout       = [0.3, 0.5]
-learning_rate = [1e-3, 5e-4]
+learning_rate = [2e-3, 1e-3]
 
 [[runs]]
 arch          = "transformer"
 embed         = [64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
 num_layers    = [1, 2]
-learning_rate = [1e-4, 5e-5]
+learning_rate = [2e-4, 1e-4]

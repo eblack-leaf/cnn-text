@@ -17,7 +17,7 @@ dataset_kind = "agnews"   # agnews | sms | imdb
 
 # ── Fixed training hyperparams ────────────────────────────────────────────────
 num_epochs     = 15       # max epochs per run (early stopping may cut short)
-batch_size     = 128
+batch_size     = 512
 max_seq_len    = 64       # AG News avg ~35 tokens; 64 is sufficient
 val_ratio      = 0.15
 vocab_size     = 16384    # BPE vocab size (only used for BPE embed entries)
@@ -49,17 +49,17 @@ dropout      = 0.5   # KimCNN / BiGRU classifier dropout
 arch           = "fasttext"
 embed          = [32, 64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
 bigram_buckets = [0, 100000]
-learning_rate  = [1e-3, 5e-4]
+learning_rate  = [2e-3, 1e-3]
 
 [[runs]]
 arch    = "kimcnn"
 embed   = [64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
 dropout = [0.3, 0.5]
-learning_rate = [1e-3, 5e-4]
+learning_rate = [2e-3, 1e-3]
 
 [[runs]]
 arch          = "transformer"
 embed         = [64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
 num_layers    = [1, 2]
 num_heads     = [2, 4]
-learning_rate = [1e-4, 5e-5]
+learning_rate = [2e-4, 1e-4]

@@ -50,7 +50,9 @@ impl CnnTextConfig {
             conv3:       Conv1dConfig::new(self.embed_dim, self.num_filters, 3).init(device),
             conv4:       Conv1dConfig::new(self.embed_dim, self.num_filters, 4).init(device),
             conv5:       Conv1dConfig::new(self.embed_dim, self.num_filters, 5).init(device),
-            attn:        LinearConfig::new(self.num_filters, 1).init(device),
+            attn3:       LinearConfig::new(self.num_filters, 1).init(device),
+            attn4:       LinearConfig::new(self.num_filters, 1).init(device),
+            attn5:       LinearConfig::new(self.num_filters, 1).init(device),
             dropout:     DropoutConfig::new(self.dropout).init(),
             classifier:  LinearConfig::new(self.num_filters * 3, self.num_classes()).init(device),
         }
@@ -78,7 +80,9 @@ impl CnnTextConfig {
             conv3:       Conv1dConfig::new(embed_dim, self.num_filters, 3).init(device),
             conv4:       Conv1dConfig::new(embed_dim, self.num_filters, 4).init(device),
             conv5:       Conv1dConfig::new(embed_dim, self.num_filters, 5).init(device),
-            attn:        LinearConfig::new(self.num_filters, 1).init(device),
+            attn3:       LinearConfig::new(self.num_filters, 1).init(device),
+            attn4:       LinearConfig::new(self.num_filters, 1).init(device),
+            attn5:       LinearConfig::new(self.num_filters, 1).init(device),
             dropout:     DropoutConfig::new(self.dropout).init(),
             classifier:  LinearConfig::new(self.num_filters * 3, self.num_classes()).init(device),
         }
@@ -93,7 +97,9 @@ pub struct CnnText<B: Backend> {
     conv3:      Conv1d<B>,
     conv4:      Conv1d<B>,
     conv5:      Conv1d<B>,
-    attn:       Linear<B>,   // shared scorer: Linear(F, 1)
+    attn3:      Linear<B>,   // per-branch scorers: Linear(F, 1)
+    attn4:      Linear<B>,
+    attn5:      Linear<B>,
     dropout:    Dropout,
     classifier: Linear<B>,
 }
@@ -126,9 +132,9 @@ impl<B: Backend> CnnText<B> {
         let c5 = activation::relu(self.conv5.forward(x));         // [B, F, L-4]
 
         // 3. Per-branch attention pooling → [B, F] each
-        let p3 = Self::attn_pool(&self.attn, c3);
-        let p4 = Self::attn_pool(&self.attn, c4);
-        let p5 = Self::attn_pool(&self.attn, c5);
+        let p3 = Self::attn_pool(&self.attn3, c3);
+        let p4 = Self::attn_pool(&self.attn4, c4);
+        let p5 = Self::attn_pool(&self.attn5, c5);
 
         // 4. Concatenate → [B, 3F], dropout, classify
         let x = self.dropout.forward(Tensor::cat(vec![p3, p4, p5], 1));

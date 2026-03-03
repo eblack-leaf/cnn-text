@@ -13,7 +13,7 @@ dataset_kind = "sms"
 
 # ── Fixed training params ─────────────────────────────────────────────────────
 num_epochs  = 20      # small dataset, more epochs needed
-batch_size  = 64
+batch_size  = 128
 max_seq_len = 48      # covers virtually all SMS messages
 val_ratio   = 0.15
 vocab_size  = 4096    # smaller vocab — SMS has limited vocabulary
@@ -34,17 +34,17 @@ dropout      = 0.5
 arch           = "fasttext"
 embed          = [32, 64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
 bigram_buckets = [0, 100000]
-learning_rate  = [1e-3, 5e-4]
+learning_rate  = [2e-3, 1e-3]
 
 [[runs]]
 arch    = "kimcnn"
 embed   = [32, 64, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
 dropout = [0.3, 0.5]
-learning_rate = [1e-3, 5e-4]
+learning_rate = [2e-3, 1e-3]
 
 [[runs]]
 arch          = "transformer"
 embed         = [32, 64, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
 num_layers    = [1, 2]
 num_heads     = [2, 4]
-learning_rate = [1e-4, 5e-5]
+learning_rate = [2e-4, 1e-4]
