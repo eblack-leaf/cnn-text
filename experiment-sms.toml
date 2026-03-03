@@ -33,7 +33,7 @@ dropout      = 0.5
 [[runs]]
 arch           = "fasttext"
 embed          = [32, 64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
-bigram_buckets = [0, 100000]
+bigram_buckets = [0, 10000]
 learning_rate  = [2e-3, 1e-3]
 
 [[runs]]
