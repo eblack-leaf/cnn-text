@@ -434,7 +434,7 @@ where
             "─".repeat(72), i + 1, runs.len(), spec.name, "─".repeat(72),
         );
 
-        let model_dir = format!("artifacts/{}", spec.name);
+        let model_dir = format!("artifacts/{}/{}", cfg.dataset_kind, spec.name);
 
         let optimizer = AdamWConfig::new()
             .with_weight_decay(0.01)
@@ -507,16 +507,17 @@ where
 
     // ── Write CSV ─────────────────────────────────────────────────────────────
 
-    std::fs::create_dir_all("artifacts").ok();
-    let results_path = "artifacts/sweep_results.csv";
+    std::fs::create_dir_all(format!("artifacts/{}", cfg.dataset_kind)).ok();
+    let results_path = format!("artifacts/{}/sweep_results.csv", cfg.dataset_kind);
     let mut csv = concat!(
-        "name,arch,embed_source,embed_dim,dropout,attn_dropout,learning_rate,",
+        "dataset,name,arch,embed_source,embed_dim,dropout,attn_dropout,learning_rate,",
         "num_filters,hidden_dim,num_heads,num_layers,d_ff,",
         "val_acc,best_epoch,non_embed_params,embed_params,total_params\n",
     ).to_string();
     for r in &results {
         csv.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{},{},{},{}\n",
+            cfg.dataset_kind,
             r.name, r.arch, r.embed_source, r.embed_dim,
             r.dropout, r.attn_dropout, r.learning_rate,
             r.num_filters, r.hidden_dim, r.num_heads, r.num_layers, r.d_ff,
@@ -524,7 +525,7 @@ where
             r.non_embed_params, r.embed_params, r.total_params,
         ));
     }
-    std::fs::write(results_path, &csv).unwrap();
+    std::fs::write(&results_path, &csv).unwrap();
     println!("\nResults saved → {results_path}");
 
     // ── Summary table ─────────────────────────────────────────────────────────
