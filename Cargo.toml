@@ -8,10 +8,13 @@ burn       = { version = "0.20.1", features = ["train", "ndarray"] }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml       = { version = "0.8", default-features = false, features = ["parse"] }
 ureq       = "3"
 ahash      = "0.8"
 indicatif  = "0.17"
 zip        = { version = "2", default-features = false, features = ["deflate"] }
+flate2     = { version = "1", default-features = false, features = ["rust_backend"] }
+tar        = "0.4"
 # ── Backend feature flags ────────────────────────────────────────────────────
 # ndarray is always present (Burn uses it internally for metric sync).
 # Enable the `gpu` feature (default) to also compile wgpu for training.

@@ -73,6 +73,127 @@ fn parse_quoted_csv(line: &str) -> Vec<String> {
     fields
 }
 
+// ── SMS Spam Collection (UCI ML Repository) ───────────────────────────────────
+
+const SMS_URL: &str =
+    "https://archive.ics.uci.edu/ml/machine-learning-databases/00228/smsspamcollection.zip";
+const SMS_OUT: &str = "data/sms+spam+collection/SMSSpamCollection";
+
+pub fn sms() {
+    use std::io::Read;
+
+    if std::path::Path::new(SMS_OUT).exists() {
+        eprintln!("{SMS_OUT} already exists — skipping download.");
+        return;
+    }
+
+    std::fs::create_dir_all("data/sms+spam+collection").expect("cannot create output dir");
+
+    eprintln!("Downloading SMS Spam Collection from UCI …");
+    let response = ureq::get(SMS_URL).call().expect("HTTP request failed");
+    let mut data = Vec::new();
+    response.into_body().into_reader().read_to_end(&mut data).expect("read error");
+    eprintln!("  {:.1} KB", data.len() as f64 / 1_000.0);
+
+    eprintln!("Extracting SMSSpamCollection …");
+    let cursor  = std::io::Cursor::new(data);
+    let mut archive = zip::ZipArchive::new(cursor).expect("invalid zip");
+
+    // Locate the data file — it may be at the root or inside a subdirectory.
+    let entry_name = (0..archive.len())
+        .find_map(|i| {
+            let e = archive.by_index(i).ok()?;
+            let name = e.name().to_string();
+            if name.contains("SMSSpamCollection") && !name.ends_with('/') {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .expect("SMSSpamCollection not found in zip");
+
+    let mut entry = archive.by_name(&entry_name).unwrap();
+    let mut out   = std::fs::File::create(SMS_OUT).expect("cannot create output file");
+    std::io::copy(&mut entry, &mut out).expect("extraction failed");
+
+    eprintln!("Saved → {SMS_OUT}");
+}
+
+// ── IMDB (Stanford Large Movie Review Dataset) ────────────────────────────────
+//
+// Source: http://ai.stanford.edu/~amaas/data/sentiment/
+// The tar.gz contains aclImdb/{train,test}/{pos,neg}/*.txt — one review per file.
+// We merge everything into data/archive/IMDB Dataset.csv (header: review,sentiment)
+// so the existing `load_imdb` loader picks it up without changes.
+
+const IMDB_URL: &str =
+    "https://ai.stanford.edu/~amaas/data/sentiment/aclImdb_v1.tar.gz";
+const IMDB_OUT: &str = "data/archive/IMDB Dataset.csv";
+
+pub fn imdb() {
+    use std::io::{Read, Write};
+
+    if std::path::Path::new(IMDB_OUT).exists() {
+        eprintln!("{IMDB_OUT} already exists — skipping download.");
+        return;
+    }
+
+    std::fs::create_dir_all("data/archive").expect("cannot create output dir");
+
+    eprintln!("Downloading Stanford IMDB dataset (~84 MB) …");
+    let response = ureq::get(IMDB_URL).call().expect("HTTP request failed");
+    let mut reader = std::io::BufReader::new(response.into_body().into_reader());
+
+    // Stream directly through gzip → tar without writing to disk.
+    let gz      = flate2::read::GzDecoder::new(&mut reader);
+    let mut tar = tar::Archive::new(gz);
+
+    let mut out = std::fs::File::create(IMDB_OUT).expect("cannot create output file");
+    writeln!(out, "review,sentiment").unwrap();
+
+    let mut total = 0usize;
+
+    for entry in tar.entries().expect("cannot read tar") {
+        let mut entry = entry.expect("corrupt tar entry");
+        let path = entry.path().expect("bad path").to_path_buf();
+
+        // We only want: aclImdb/{train,test}/{pos,neg}/*.txt
+        let parts: Vec<&str> = path
+            .components()
+            .map(|c| c.as_os_str().to_str().unwrap_or(""))
+            .collect();
+
+        if parts.len() < 4 { continue; }
+        if parts[0] != "aclImdb" { continue; }
+        // parts[1]: "train" | "test"
+        // parts[2]: "pos" | "neg"  (skip "unsup", "urls", etc.)
+        let sentiment = match parts[2] {
+            "pos" => "positive",
+            "neg" => "negative",
+            _     => continue,
+        };
+        if !parts[3].ends_with(".txt") { continue; }
+
+        let mut content = String::new();
+        entry.read_to_string(&mut content).expect("read error");
+
+        // Escape double-quotes and strip newlines for CSV.
+        let escaped = content
+            .replace('"', "\"\"")
+            .replace(['\n', '\r'], " ");
+
+        writeln!(out, "\"{escaped}\",{sentiment}").unwrap();
+        total += 1;
+
+        if total % 5_000 == 0 {
+            eprint!("\r  {total} reviews written…");
+        }
+    }
+
+    eprintln!("\r  {total} reviews written.");
+    eprintln!("Saved → {IMDB_OUT}");
+}
+
 // ── GloVe ─────────────────────────────────────────────────────────────────────
 
 const GLOVE_URL:      &str = "https://nlp.stanford.edu/data/glove.6B.zip";

@@ -1,0 +1,49 @@
+# experiment-imdb.toml — Edge-Device Sweep on IMDB Movie Reviews
+#
+# Fetch first:  cargo run -- fetch-imdb
+# Run with:     cargo run --release -- sweep experiment-imdb.toml
+#
+# IMDB reviews are long (median ~200 words, max ~1000+).
+# max_seq_len = 256 covers ~90% of reviews; try 128 if memory is tight.
+# Binary task (positive/negative sentiment).
+
+dataset      = "data/archive/IMDB Dataset.csv"
+dataset_kind = "imdb"
+
+# ── Fixed training params ─────────────────────────────────────────────────────
+num_epochs  = 10      # binary task converges faster than 4-class
+batch_size  = 64      # smaller batch to fit longer sequences in memory
+max_seq_len = 256     # covers ~90% of reviews
+val_ratio   = 0.15
+vocab_size  = 8192
+patience    = 3
+
+# ── Global arch defaults ──────────────────────────────────────────────────────
+num_filters  = 128
+hidden_dim   = 128
+num_heads    = 4
+num_layers   = 2
+d_ff         = 256
+attn_dropout = 0.1
+dropout      = 0.5
+
+# ── Per-architecture sweep blocks ─────────────────────────────────────────────
+# Note: BiGRU is omitted by default — it's ~20× slower and IMDB sequences
+# are long, making it very expensive. Add "bigru" if you have time.
+
+[[runs]]
+arch          = "fasttext"
+embed         = [64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
+learning_rate = [1e-3, 5e-4]
+
+[[runs]]
+arch          = "kimcnn"
+embed         = [64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
+dropout       = [0.3, 0.5]
+learning_rate = [1e-3, 5e-4]
+
+[[runs]]
+arch          = "transformer"
+embed         = [64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
+num_layers    = [1, 2]
+learning_rate = [1e-4, 5e-5]

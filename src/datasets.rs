@@ -2,17 +2,14 @@
 //
 // Each loader normalises its native format into plain `(label, text)` pairs.
 // `DatasetKind::load` returns `(train_pairs, test_pairs_opt)`.
-// When a test split is pre-provided (Amazon) it is used as the validation set;
-// otherwise `val_ratio` in TrainingConfig controls the split.
+// test_pairs_opt is always None here — val split is controlled by `val_ratio`.
 
 #[derive(Clone, Debug, Default)]
 pub enum DatasetKind {
-    /// Headerless `label,text` CSV — the project's existing format.
+    /// Headerless `label,text` CSV — the project's native format.
+    /// AG News (fetched via `fetch-agnews`) writes to this format.
     #[default]
-    Custom,
-    /// amazon_review_polarity_csv/ directory with train.csv / test.csv.
-    /// Labels: 1 → "negative", 2 → "positive". Columns: polarity,title,review.
-    Amazon,
+    AgNews,
     /// SMSSpamCollection file — tab-separated `label<TAB>text`.
     /// Labels: "ham" / "spam".
     Sms,
@@ -24,40 +21,36 @@ pub enum DatasetKind {
 impl DatasetKind {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            "custom" => Some(Self::Custom),
-            "amazon" => Some(Self::Amazon),
-            "sms"    => Some(Self::Sms),
-            "imdb"   => Some(Self::Imdb),
-            _        => None,
+            "agnews" | "custom" => Some(Self::AgNews),
+            "sms"               => Some(Self::Sms),
+            "imdb"              => Some(Self::Imdb),
+            _                   => None,
         }
     }
 
-    /// Default path/directory for this dataset relative to the project root.
+    /// Default path for this dataset relative to the project root.
     pub fn default_path(&self) -> &'static str {
         match self {
-            Self::Custom => "data/dataset.csv",
-            Self::Amazon => "data/amazon_review_polarity_csv",
+            Self::AgNews => "data/dataset.csv",
             Self::Sms    => "data/sms+spam+collection/SMSSpamCollection",
             Self::Imdb   => "data/archive/IMDB Dataset.csv",
         }
     }
 
     /// Load `(train_pairs, test_pairs_opt)`.
-    /// `path` is a file path for Custom/Sms/Imdb, a directory for Amazon.
     pub fn load(&self, path: &str) -> (Vec<(String, String)>, Option<Vec<(String, String)>>) {
         match self {
-            Self::Custom => (load_custom_csv(path), None),
-            Self::Amazon => load_amazon(path),
+            Self::AgNews => (load_csv(path), None),
             Self::Sms    => (load_sms(path), None),
             Self::Imdb   => (load_imdb(path), None),
         }
     }
 }
 
-// ── Custom (existing format) ───────────────────────────────────────────────────
+// ── AG News / generic headerless CSV ─────────────────────────────────────────
 
 /// Headerless `label,text` CSV — the project's native format.
-fn load_custom_csv(path: &str) -> Vec<(String, String)> {
+fn load_csv(path: &str) -> Vec<(String, String)> {
     let content = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("Cannot read {path}: {e}"));
     content
@@ -68,39 +61,6 @@ fn load_custom_csv(path: &str) -> Vec<(String, String)> {
             let text  = parts.next()?.trim().to_string();
             if label.is_empty() || text.is_empty() { return None; }
             Some((label, text))
-        })
-        .collect()
-}
-
-// ── Amazon Review Polarity ────────────────────────────────────────────────────
-
-fn load_amazon(dir: &str) -> (Vec<(String, String)>, Option<Vec<(String, String)>>) {
-    let train_path = format!("{dir}/train.csv");
-    let test_path  = format!("{dir}/test.csv");
-    println!("Loading Amazon train from {train_path} …");
-    let train = load_amazon_file(&train_path);
-    println!("Loading Amazon test  from {test_path} …");
-    let test  = load_amazon_file(&test_path);
-    println!("Amazon: {} train / {} test pairs", train.len(), test.len());
-    (train, Some(test))
-}
-
-fn load_amazon_file(path: &str) -> Vec<(String, String)> {
-    let content = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("Cannot read {path}: {e}"));
-    content
-        .lines()
-        .filter_map(|line| {
-            let fields = parse_quoted_csv_row(line);
-            if fields.len() < 3 { return None; }
-            let label = match fields[0].trim() {
-                "1" => "negative",
-                "2" => "positive",
-                _   => return None,
-            };
-            // Concatenate title + review body.
-            let text = format!("{} {}", fields[1].trim(), fields[2].trim());
-            Some((label.to_string(), text))
         })
         .collect()
 }
@@ -131,7 +91,6 @@ fn load_imdb(path: &str) -> Vec<(String, String)> {
     lines.next(); // skip header row
     lines
         .filter_map(|line| {
-            // Format: "review text",sentiment  (review is double-quoted)
             let fields = parse_quoted_csv_row(line);
             if fields.len() < 2 { return None; }
             let review    = strip_html(fields[0].trim());
@@ -152,23 +111,23 @@ fn parse_quoted_csv_row(line: &str) -> Vec<String> {
     loop {
         match chars.peek() {
             None => break,
-            Some(&',') => { chars.next(); } // consume separator before next field
+            Some(&',') => { chars.next(); }
             _ => {}
         }
         if chars.peek().is_none() { break; }
 
         if chars.peek() == Some(&'"') {
-            chars.next(); // consume opening quote
+            chars.next();
             let mut field = String::new();
             loop {
                 match chars.next() {
                     None      => break,
                     Some('"') => {
                         if chars.peek() == Some(&'"') {
-                            chars.next(); // escaped "" → one literal "
+                            chars.next();
                             field.push('"');
                         } else {
-                            break; // closing quote
+                            break;
                         }
                     }
                     Some(c) => field.push(c),
@@ -176,7 +135,6 @@ fn parse_quoted_csv_row(line: &str) -> Vec<String> {
             }
             fields.push(field);
         } else {
-            // Unquoted field: read until next comma.
             let field: String = chars.by_ref().take_while(|&c| c != ',').collect();
             fields.push(field);
         }

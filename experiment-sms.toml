@@ -1,0 +1,49 @@
+# experiment-sms.toml — Edge-Device Sweep on SMS Spam Collection
+#
+# Fetch first:  cargo run -- fetch-sms
+# Run with:     cargo run --release -- sweep experiment-sms.toml
+#
+# SMS messages are very short (median ~15 words, max ~50).
+# max_seq_len = 48 covers virtually all messages.
+# Only ~5 500 samples — overfitting is a real risk; watch train vs val gap.
+# Binary task (ham/spam) so accuracy ceiling is high even for tiny models.
+
+dataset      = "data/sms+spam+collection/SMSSpamCollection"
+dataset_kind = "sms"
+
+# ── Fixed training params ─────────────────────────────────────────────────────
+num_epochs  = 20      # small dataset, more epochs needed
+batch_size  = 64
+max_seq_len = 48      # covers virtually all SMS messages
+val_ratio   = 0.15
+vocab_size  = 4096    # smaller vocab — SMS has limited vocabulary
+patience    = 5
+
+# ── Global arch defaults ──────────────────────────────────────────────────────
+num_filters  = 64     # smaller than default given the small dataset
+hidden_dim   = 64
+num_heads    = 4
+num_layers   = 2
+d_ff         = 128
+attn_dropout = 0.1
+dropout      = 0.5
+
+# ── Per-architecture sweep blocks ─────────────────────────────────────────────
+
+[[runs]]
+arch  = "fasttext"
+embed = [32, 64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
+learning_rate = [1e-3, 5e-4]
+
+[[runs]]
+arch    = "kimcnn"
+embed   = [32, 64, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
+dropout = [0.3, 0.5]
+learning_rate = [1e-3, 5e-4]
+
+[[runs]]
+arch          = "transformer"
+embed         = [32, 64, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
+num_layers    = [1, 2]
+num_heads     = [2, 4]
+learning_rate = [1e-4, 5e-5]
