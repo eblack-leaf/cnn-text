@@ -11,11 +11,11 @@ dataset      = "data/archive/IMDB Dataset.csv"
 dataset_kind = "imdb"
 
 # ── Fixed training params ─────────────────────────────────────────────────────
-num_epochs  = 10      # binary task converges faster than 4-class
+num_epochs  = 20      # binary task converges faster than 4-class
 batch_size  = 64      # smaller batch to fit longer sequences in memory
-max_seq_len = 256     # covers ~90% of reviews
+max_seq_len = 300     # covers ~90% of reviews
 val_ratio   = 0.15
-vocab_size  = 8192
+vocab_size  = 16384
 patience    = 3
 
 # ── Global arch defaults ──────────────────────────────────────────────────────
@@ -32,9 +32,10 @@ dropout      = 0.5
 # are long, making it very expensive. Add "bigru" if you have time.
 
 [[runs]]
-arch          = "fasttext"
-embed         = [64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
-learning_rate = [1e-3, 5e-4]
+arch           = "fasttext"
+embed          = [64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
+bigram_buckets = [0, 100000]
+learning_rate  = [1e-3, 5e-4]
 
 [[runs]]
 arch          = "kimcnn"

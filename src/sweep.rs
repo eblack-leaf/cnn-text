@@ -163,11 +163,14 @@ pub struct ArchGrid {
     #[serde(default)] pub hidden_dim:    Vec<usize>,
 
     // ── Transformer ───────────────────────────────────────────────────────────
-    #[serde(default)] pub num_heads:     Vec<usize>,
-    #[serde(default)] pub num_layers:    Vec<usize>,
-    #[serde(default)] pub d_ff:          Vec<usize>,
-    #[serde(default)] pub attn_dropout:  Vec<f64>,
-    #[serde(default)] pub warmup_steps:  Vec<usize>,
+    #[serde(default)] pub num_heads:       Vec<usize>,
+    #[serde(default)] pub num_layers:      Vec<usize>,
+    #[serde(default)] pub d_ff:            Vec<usize>,
+    #[serde(default)] pub attn_dropout:    Vec<f64>,
+    #[serde(default)] pub warmup_steps:    Vec<usize>,
+
+    // ── FastText ──────────────────────────────────────────────────────────────
+    #[serde(default)] pub bigram_buckets:  Vec<usize>,
 }
 
 // ── Run specification ─────────────────────────────────────────────────────────
@@ -226,26 +229,30 @@ fn arch_runs(ag: &ArchGrid, cfg: &ExperimentConfig) -> Vec<RunSpec> {
     };
     let embed_swept = ag.embed.len() > 1;
 
-    let lrs           = resolve(&ag.learning_rate, default_lr);
-    let dropouts      = resolve(&ag.dropout,       cfg.dropout);
-    let attn_drops    = resolve(&ag.attn_dropout,  cfg.attn_dropout);
-    let num_filters_v = resolve(&ag.num_filters,   cfg.num_filters);
-    let hidden_dims   = resolve(&ag.hidden_dim,    cfg.hidden_dim);
-    let num_heads_v   = resolve(&ag.num_heads,     cfg.num_heads);
-    let num_layers_v  = resolve(&ag.num_layers,    cfg.num_layers);
-    let d_ffs         = resolve(&ag.d_ff,          cfg.d_ff);
-    let warmups       = resolve(&ag.warmup_steps,  default_warmup);
+    let lrs           = resolve(&ag.learning_rate,  default_lr);
+    let dropouts      = resolve(&ag.dropout,        cfg.dropout);
+    let attn_drops    = resolve(&ag.attn_dropout,   cfg.attn_dropout);
+    let num_filters_v = resolve(&ag.num_filters,    cfg.num_filters);
+    let hidden_dims   = resolve(&ag.hidden_dim,     cfg.hidden_dim);
+    let num_heads_v   = resolve(&ag.num_heads,      cfg.num_heads);
+    let num_layers_v  = resolve(&ag.num_layers,     cfg.num_layers);
+    let d_ffs         = resolve(&ag.d_ff,           cfg.d_ff);
+    let warmups       = resolve(&ag.warmup_steps,   default_warmup);
+    let bigrams       = resolve(&ag.bigram_buckets, cfg.bigram_buckets);
 
     // Tag closures — only emit a tag when that axis has >1 value
-    let lr_tag = tag_if_swept(&ag.learning_rate, "lr", |v| format!("{v:.0e}"));
-    let do_tag = tag_if_swept(&ag.dropout,       "do", |v| format!("{:.0}", v * 100.0));
-    let ad_tag = tag_if_swept(&ag.attn_dropout,  "ad", |v| format!("{:.0}", v * 100.0));
-    let f_tag  = tag_if_swept(&ag.num_filters,   "f",  |v| format!("{v}"));
-    let h_tag  = tag_if_swept(&ag.hidden_dim,    "h",  |v| format!("{v}"));
-    let nh_tag = tag_if_swept(&ag.num_heads,     "nh", |v| format!("{v}"));
-    let nl_tag = tag_if_swept(&ag.num_layers,    "nl", |v| format!("{v}"));
-    let df_tag = tag_if_swept(&ag.d_ff,          "ff", |v| format!("{v}"));
-    let ws_tag = tag_if_swept(&ag.warmup_steps,  "w",  |v| format!("{v}"));
+    let lr_tag = tag_if_swept(&ag.learning_rate,  "lr", |v| format!("{v:.0e}"));
+    let do_tag = tag_if_swept(&ag.dropout,        "do", |v| format!("{:.0}", v * 100.0));
+    let ad_tag = tag_if_swept(&ag.attn_dropout,   "ad", |v| format!("{:.0}", v * 100.0));
+    let f_tag  = tag_if_swept(&ag.num_filters,    "f",  |v| format!("{v}"));
+    let h_tag  = tag_if_swept(&ag.hidden_dim,     "h",  |v| format!("{v}"));
+    let nh_tag = tag_if_swept(&ag.num_heads,      "nh", |v| format!("{v}"));
+    let nl_tag = tag_if_swept(&ag.num_layers,     "nl", |v| format!("{v}"));
+    let df_tag = tag_if_swept(&ag.d_ff,           "ff", |v| format!("{v}"));
+    let ws_tag = tag_if_swept(&ag.warmup_steps,   "w",  |v| format!("{v}"));
+    let bg_tag = tag_if_swept(&ag.bigram_buckets, "bg", |v| {
+        if *v == 0 { "0".to_string() } else { format!("{}k", v / 1000) }
+    });
 
     let mut runs = Vec::new();
 
@@ -259,18 +266,20 @@ fn arch_runs(ag: &ArchGrid, cfg: &ExperimentConfig) -> Vec<RunSpec> {
     for &nl         in &num_layers_v {
     for &df         in &d_ffs {
     for &warmup     in &warmups {
+    for &bigram     in &bigrams {
         let embed_tag = if embed_swept {
             format!("-{}", embed.name_tag())
         } else {
             String::new()
         };
 
-        let name = format!("{arch}{}{}{}{}{}{}{}{}{}{}",
-            embed_tag,   lr_tag(&lr),
+        let name = format!("{arch}{}{}{}{}{}{}{}{}{}{}{}",
+            embed_tag,    lr_tag(&lr),
             do_tag(&dropout), ad_tag(&attn_drop),
-            f_tag(&nf),  h_tag(&hd),
-            nh_tag(&nh), nl_tag(&nl),
-            df_tag(&df), ws_tag(&warmup),
+            f_tag(&nf),   h_tag(&hd),
+            nh_tag(&nh),  nl_tag(&nl),
+            df_tag(&df),  ws_tag(&warmup),
+            bg_tag(&bigram),
         );
 
         runs.push(RunSpec {
@@ -295,9 +304,9 @@ fn arch_runs(ag: &ArchGrid, cfg: &ExperimentConfig) -> Vec<RunSpec> {
             val_ratio:      cfg.val_ratio,
             patience:       cfg.patience,
             freeze:         cfg.freeze,
-            bigram_buckets: cfg.bigram_buckets,
+            bigram_buckets: bigram,
         });
-    }}}}}}}}}}
+    }}}}}}}}}}}
 
     runs
 }
@@ -348,6 +357,9 @@ pub fn count_params(
             let cls     = embed_dim * num_classes + num_classes;
             pos_emb + (mha + ffn + ln) * num_layers + cls
         }
+        // Placeholder — update once CnnText::forward is implemented
+        "cnn-text" => embed_dim * num_classes + num_classes,
+
         _ => 0,
     };
 
@@ -367,6 +379,7 @@ struct SweepResult {
     arch:             String,
     embed_source:     String,   // "bpe" or glove stem e.g. "glove100d"
     embed_dim:        usize,
+    bigram_buckets:   usize,
     dropout:          f64,
     attn_dropout:     f64,
     learning_rate:    f64,
@@ -489,15 +502,16 @@ where
             name: spec.name.clone(),
             arch: spec.arch.clone(),
             embed_source,
-            embed_dim:     spec.embed_dim,
-            dropout:       spec.dropout,
-            attn_dropout:  spec.attn_dropout,
-            learning_rate: spec.learning_rate,
-            num_filters:   spec.num_filters,
-            hidden_dim:    spec.hidden_dim,
-            num_heads:     spec.num_heads,
-            num_layers:    spec.num_layers,
-            d_ff:          spec.d_ff,
+            embed_dim:      spec.embed_dim,
+            bigram_buckets: spec.bigram_buckets,
+            dropout:        spec.dropout,
+            attn_dropout:   spec.attn_dropout,
+            learning_rate:  spec.learning_rate,
+            num_filters:    spec.num_filters,
+            hidden_dim:     spec.hidden_dim,
+            num_heads:      spec.num_heads,
+            num_layers:     spec.num_layers,
+            d_ff:           spec.d_ff,
             best_val_acc, best_epoch,
             non_embed_params: non_embed,
             embed_params:     embed,
@@ -510,15 +524,16 @@ where
     std::fs::create_dir_all(format!("artifacts/{}", cfg.dataset_kind)).ok();
     let results_path = format!("artifacts/{}/sweep_results.csv", cfg.dataset_kind);
     let mut csv = concat!(
-        "dataset,name,arch,embed_source,embed_dim,dropout,attn_dropout,learning_rate,",
+        "dataset,name,arch,embed_source,embed_dim,bigram_buckets,",
+        "dropout,attn_dropout,learning_rate,",
         "num_filters,hidden_dim,num_heads,num_layers,d_ff,",
         "val_acc,best_epoch,non_embed_params,embed_params,total_params\n",
     ).to_string();
     for r in &results {
         csv.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{},{},{},{}\n",
             cfg.dataset_kind,
-            r.name, r.arch, r.embed_source, r.embed_dim,
+            r.name, r.arch, r.embed_source, r.embed_dim, r.bigram_buckets,
             r.dropout, r.attn_dropout, r.learning_rate,
             r.num_filters, r.hidden_dim, r.num_heads, r.num_layers, r.d_ff,
             r.best_val_acc, r.best_epoch,

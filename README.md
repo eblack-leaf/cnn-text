@@ -8,7 +8,7 @@ The key question: **how much accuracy do you give up as you shrink the model?** 
 
 ## Architectures
 
-Four architectures ordered roughly by parameter count and compute cost:
+Five architectures ordered roughly by parameter count and compute cost:
 
 ### FastText (smallest / fastest)
 
@@ -16,7 +16,7 @@ Four architectures ordered roughly by parameter count and compute cost:
 tokens [B, L]  →  Embedding(vocab, E)  →  Masked mean  →  Linear(E, C)
 ```
 
-Optional bigram features: set `bigram_buckets > 0` to add a second hash embedding for adjacent-token pairs.
+Optional bigram features: set `bigram_buckets > 0` to add a hash embedding for adjacent-token pairs — works with both BPE and word-level tokenization.
 
 ### Kim CNN
 
@@ -50,6 +50,10 @@ tokens [B, L]  →  TokenEmbed(vocab, E) + PosEmbed(L, E)  [B, L, E]
 
 Fully parallel. PAD-masked attention. `embed_dim` must be divisible by `num_heads`.
 
+### CnnText (custom)
+
+Custom architecture slot. Registered as `arch = "cnn-text"`. Implement in `src/model.rs`.
+
 ---
 
 ## Quickstart
@@ -61,59 +65,97 @@ cargo build --release
 # 2. Fetch AG News (127k samples, 4 classes)
 cargo run --release -- fetch-agnews
 
-# 3. Run the sweep — trains every arch × embed_dim combination
+# 3. Run the sweep
 cargo run --release -- sweep experiment.toml
 
-# Results saved to artifacts/sweep_results.csv
+# Results saved to artifacts/agnews/sweep_results.csv
 # Sorted summary printed to terminal at the end
 ```
 
 ---
 
-## Sweep Configuration (`experiment.toml`)
+## Sweep Configuration
 
-The sweep config is a TOML file with a `[grid]` section. Every combination of the arrays in `[grid]` becomes one training run.
+Each experiment file uses per-architecture `[[runs]]` blocks. Only the axes declared in a block are swept for that arch — no inflated cross-products from irrelevant axes.
 
 ```toml
-dataset = "data/dataset.csv"
+dataset      = "data/dataset.csv"
+dataset_kind = "agnews"
 
-# Fixed training params
 num_epochs  = 15
 batch_size  = 128
 max_seq_len = 64
+vocab_size  = 16384
 patience    = 5
 
-[grid]
-arch      = ["fasttext", "kimcnn", "transformer"]
-embed_dim = [32, 64, 128]
-# dropout = [0.3, 0.5]          # optional extra sweep axis
-# learning_rate = [1e-3, 5e-4]  # overrides per-arch defaults
+# Global arch defaults (used when a [[runs]] block omits the field)
+num_filters  = 128
+hidden_dim   = 128
+num_heads    = 4
+num_layers   = 2
+d_ff         = 256
+attn_dropout = 0.1
+dropout      = 0.5
+
+[[runs]]
+arch           = "fasttext"
+embed          = [32, 64, "data/glove.6B.100d.txt"]
+bigram_buckets = [0, 100000]
+learning_rate  = [1e-3, 5e-4]
+
+[[runs]]
+arch          = "kimcnn"
+embed         = [64, 128, "data/glove.6B.100d.txt"]
+dropout       = [0.3, 0.5]
+learning_rate = [1e-3, 5e-4]
+
+[[runs]]
+arch          = "transformer"
+embed         = [64, 128]
+num_layers    = [1, 2]
+num_heads     = [2, 4]
+learning_rate = [1e-4, 5e-5]
 ```
 
-Defaults per field if omitted:
+### The `embed` axis
+
+Each entry is either a **string** (pretrained vectors file path) or an **integer** (BPE dimension). Mixed lists are allowed:
+
+```toml
+embed = ["data/glove.6B.100d.txt", 32, "data/fasttext/wiki-news-300d-1M.vec", 128]
+```
+
+- String → load word vectors from that file, infer dim from filename
+- Integer → train BPE embeddings from scratch at that dimension
+
+The run name uses `g100d` / `g300d` for GloVe/fastText entries and `e32` / `e128` for BPE, only when the axis has more than one value.
+
+### Global defaults
 
 | Field | Default | Notes |
 |---|---|---|
 | `num_epochs` | 15 | Max epochs (early stopping may cut short) |
 | `batch_size` | 128 | |
 | `max_seq_len` | 64 | AG News avg ~35 tokens — 64 is sufficient |
-| `vocab_size` | 8192 | BPE vocab size; ignored with GloVe |
+| `vocab_size` | 8192 | BPE vocab size; ignored when using pretrained vectors |
 | `val_ratio` | 0.15 | Fraction held out for validation |
 | `patience` | 5 | Early stopping patience (0 = disabled) |
 | `freeze` | false | Freeze embedding weights |
-| `bigram_buckets` | 0 | FastText bigrams; set e.g. 100000 to enable |
+| `bigram_buckets` | 0 | FastText bigrams; override per arch block |
 | `num_filters` | 128 | Kim CNN: filters per kernel |
 | `hidden_dim` | 128 | BiGRU: hidden size per direction |
 | `num_heads` | 4 | Transformer: attention heads |
 | `num_layers` | 2 | Transformer: encoder layers |
 | `d_ff` | 256 | Transformer: FFN hidden dim |
-| `dropout` | 0.5 | Dropout (single value or array to sweep) |
+| `attn_dropout` | 0.1 | Transformer attention dropout |
+| `dropout` | 0.5 | KimCNN / BiGRU classifier dropout |
 | `learning_rate` | arch-dependent | 1e-4 + 500 warmup for transformer; 1e-3 otherwise |
 
 ### Sweep output
 
-- `artifacts/sweep_results.csv` — one row per run with: name, arch, embed_dim, dropout, lr, val_acc, best_epoch, non_embed_params, embed_params, total_params
-- Terminal table sorted by val_acc descending
+Results are written to `artifacts/<dataset_kind>/sweep_results.csv` — one row per run — so different datasets never overwrite each other.
+
+CSV columns: `dataset, name, arch, embed_source, embed_dim, bigram_buckets, dropout, attn_dropout, learning_rate, num_filters, hidden_dim, num_heads, num_layers, d_ff, val_acc, best_epoch, non_embed_params, embed_params, total_params`
 
 ---
 
@@ -126,7 +168,10 @@ cargo run --release -- train mymodel
 # Kim CNN with 64-dim BPE embeddings
 cargo run --release -- train mymodel --arch kimcnn --embed-dim 64
 
-# Transformer with GloVe 100d (fetch first: cargo run -- fetch-glove 100)
+# FastText with bigrams
+cargo run --release -- train mymodel --arch fasttext --bigram-buckets 100000
+
+# Transformer with GloVe 100d
 cargo run --release -- train mymodel --arch transformer --glove data/glove.6B.100d.txt
 
 # Load base params from a TOML file, override individual flags
@@ -138,10 +183,10 @@ cargo run --release -- train mymodel --config experiment.toml --arch fasttext --
 | Flag | Default | Description |
 |---|---|---|
 | `--config <path>` | — | Load base hyperparams from a TOML file |
-| `--arch <name>` | `fasttext` | `fasttext` \| `kimcnn` \| `bigru` \| `transformer` |
+| `--arch <name>` | `fasttext` | `fasttext` \| `kimcnn` \| `bigru` \| `transformer` \| `cnn-text` |
 | `--dataset <kind>` | `agnews` | `agnews` \| `sms` \| `imdb` |
 | `--data <path>` | (kind default) | Override dataset file path |
-| `--glove <path>` | — | GloVe file; omit to use BPE from scratch |
+| `--glove <path>` | — | Pretrained word vectors file (GloVe or fastText `.vec` format); omit to use BPE |
 | `--epochs N` | 15 | Max training epochs |
 | `--batch-size N` | 128 | Batch size |
 | `--lr F` | arch-dependent | AdamW learning rate |
@@ -150,7 +195,7 @@ cargo run --release -- train mymodel --config experiment.toml --arch fasttext --
 | `--vocab-size N` | 8192 | BPE vocabulary size |
 | `--val-ratio F` | 0.15 | Validation split fraction |
 | `--patience N` | 5 | Early stopping patience (0 = disabled) |
-| `--embed-dim N` | 128 | Embedding dimension (overridden by GloVe file) |
+| `--embed-dim N` | 128 | Embedding dimension (overridden by vector file) |
 | `--dropout F` | 0.5 | Dropout probability |
 | `--num-filters N` | 128 | Kim CNN: filters per kernel |
 | `--hidden-dim N` | 128 | BiGRU: hidden size per direction |
@@ -162,7 +207,7 @@ cargo run --release -- train mymodel --config experiment.toml --arch fasttext --
 
 ---
 
-## Dataset
+## Datasets and Embeddings
 
 ### AG News (default)
 
@@ -172,25 +217,26 @@ cargo run --release -- train mymodel --config experiment.toml --arch fasttext --
 cargo run -- fetch-agnews   # writes data/dataset.csv
 ```
 
-### GloVe embeddings (optional)
-
-```bash
-cargo run -- fetch-glove          # 100d (default)
-cargo run -- fetch-glove 300      # 300d
-```
-
-Downloads the Stanford GloVe 822 MB zip, extracts the requested file, deletes the zip.
-
 ### Alternative datasets
 
-| `--dataset` | Fetch command | Default path | Format |
-|---|---|---|---|
-| `agnews` (default) | `cargo run -- fetch-agnews` | `data/dataset.csv` | Headerless `label,text` CSV |
-| `sms` | `cargo run -- fetch-sms` | `data/sms+spam+collection/SMSSpamCollection` | Tab-separated `label<TAB>text` |
-| `imdb` | `cargo run -- fetch-imdb` | `data/archive/IMDB Dataset.csv` | CSV with header `review,sentiment` |
+| `--dataset` | Fetch command | Default path | Samples | Classes |
+|---|---|---|---|---|
+| `agnews` | `cargo run -- fetch-agnews` | `data/dataset.csv` | ~127k | 4 |
+| `sms` | `cargo run -- fetch-sms` | `data/sms+spam+collection/SMSSpamCollection` | ~5.5k | 2 (ham/spam) |
+| `imdb` | `cargo run -- fetch-imdb` | `data/archive/IMDB Dataset.csv` | 50k | 2 (pos/neg) |
 
-SMS source: [UCI ML Repository](https://archive.ics.uci.edu/ml/datasets/SMS+Spam+Collection) (~5 500 samples, ham/spam).
-IMDB source: [Stanford Large Movie Review Dataset](https://ai.stanford.edu/~amaas/data/sentiment/) (~84 MB, 50 000 reviews, positive/negative).
+### Pretrained word vectors
+
+Pretrained vectors are passed via the `embed` axis in a `[[runs]]` block or `--glove` flag for single runs. Both GloVe and fastText `.vec` format are supported.
+
+```bash
+# Stanford GloVe (~822 MB zip, extracts one file, deletes zip)
+cargo run -- fetch-glove          # 100d → data/glove.6B.100d.txt
+cargo run -- fetch-glove 300      # 300d → data/glove.6B.300d.txt
+
+# Facebook fastText wiki-news (~600 MB zip)
+cargo run -- fetch-fasttext       # 300d → data/fasttext/wiki-news-300d-1M.vec
+```
 
 ---
 
@@ -201,7 +247,7 @@ cargo run --release -- predict <model> "Fed raises rates as inflation fears grow
 # Business  (97.2%)
 ```
 
-Architecture is detected automatically from `artifacts/<model>/config.json`.
+Architecture is detected automatically from `artifacts/<dataset>/<model>/config.json`.
 
 ---
 
@@ -209,22 +255,23 @@ Architecture is detected automatically from `artifacts/<model>/config.json`.
 
 *(Fill in after running the sweep — sorted by val_acc)*
 
-| Run | arch | embed_dim | val% | non-embed params | total params |
-|---|---|---|---|---|---|
-| — | — | — | — | — | — |
+| Run | arch | embed | bigrams | val% | non-embed params | total params |
+|---|---|---|---|---|---|---|
+| — | — | — | — | — | — | — |
 
 ### Model size reference
 
-For AG News (4 classes), BPE vocab ~8192:
+For AG News (4 classes), BPE vocab ~16384:
 
 | arch | embed_dim | embed params | non-embed params |
 |---|---|---|---|
-| fasttext | 32 | ~262K | < 1K |
-| fasttext | 128 | ~1.05M | < 1K |
-| kimcnn | 32 | ~262K | ~150K |
-| kimcnn | 128 | ~1.05M | ~540K |
-| transformer (2L) | 64 | ~524K | ~270K |
-| transformer (2L) | 128 | ~1.05M | ~1.05M |
+| fasttext | 32 | ~524K | < 1K |
+| fasttext | 128 | ~2.10M | < 1K |
+| fasttext + bigrams (100k) | 128 | ~2.10M + 1.28M | < 1K |
+| kimcnn | 64 | ~1.05M | ~300K |
+| kimcnn | 128 | ~2.10M | ~540K |
+| transformer (2L) | 64 | ~1.05M | ~270K |
+| transformer (2L) | 128 | ~2.10M | ~1.05M |
 
 The embedding table dominates. `non-embed params` is the actual model logic.
 
@@ -233,30 +280,31 @@ The embedding table dominates. `non-embed params` is the actual model logic.
 ## Artifacts
 
 ```
-artifacts/<model>/
-  config.json       # architecture hyperparams + class names
-  model.mpk         # best weights (updated only when val loss improves)
-  metrics.csv       # epoch, train_loss, train_acc, val_loss, val_acc, epoch_secs
-  tokenizer.json    # BPE or word-level vocabulary
-  checkpoint/
-    model-1.mpk
-    model-2.mpk
-    ...
-
-artifacts/sweep_results.csv   # produced by `sweep` command
+artifacts/
+  <dataset_kind>/           # agnews/ | imdb/ | sms/
+    sweep_results.csv       # produced by `sweep` command
+    <run_name>/
+      config.json           # architecture hyperparams + class names
+      model.mpk             # best weights (updated only when val loss improves)
+      metrics.csv           # epoch, train_loss, train_acc, val_loss, val_acc, epoch_secs
+      tokenizer.json        # BPE or word-level vocabulary
+      checkpoint/
+        model-1.mpk
+        model-2.mpk
+        ...
 ```
 
 Roll back to a specific checkpoint:
 
 ```bash
-cp artifacts/<model>/checkpoint/model-5.mpk artifacts/<model>/model.mpk
+cp artifacts/agnews/<model>/checkpoint/model-5.mpk artifacts/agnews/<model>/model.mpk
 ```
 
 ---
 
 ## Backend
 
-GPU (WebGPU) is the default. Switch to CPU-only (no feature flag required at runtime):
+GPU (WebGPU) is the default. Switch to CPU-only:
 
 ```bash
 cargo run --no-default-features --release -- sweep experiment.toml

@@ -194,6 +194,58 @@ pub fn imdb() {
     eprintln!("Saved → {IMDB_OUT}");
 }
 
+// ── fastText pretrained vectors (Facebook/Meta) ───────────────────────────────
+//
+// Source: https://fasttext.cc/docs/en/english-vectors.html
+// wiki-news-300d-1M.vec — 300d, 1M words, trained on Wikipedia 2017 + news.
+// Format: first line is "<word_count> <dim>", then one "word f1 f2 ..." per line.
+// Compatible with the GloVe loader (header line is auto-skipped).
+
+const FASTTEXT_URL: &str =
+    "https://dl.fbaipublicfiles.com/fasttext/vectors-english/wiki-news-300d-1M.vec.zip";
+const FASTTEXT_ZIP: &str = "data/fasttext/wiki-news-300d-1M.vec.zip";
+const FASTTEXT_OUT: &str = "data/fasttext/wiki-news-300d-1M.vec";
+
+pub fn fasttext_wiki() {
+    use std::io::{Read, Write};
+
+    if std::path::Path::new(FASTTEXT_OUT).exists() {
+        eprintln!("{FASTTEXT_OUT} already exists — skipping download.");
+        return;
+    }
+
+    std::fs::create_dir_all("data/fasttext").expect("cannot create data/fasttext/");
+
+    eprintln!("Downloading fastText wiki-news-300d-1M (~600 MB) …");
+    let response = ureq::get(FASTTEXT_URL).call().expect("HTTP request failed");
+    let mut reader = std::io::BufReader::new(response.into_body().into_reader());
+    let mut zip_file = std::fs::File::create(FASTTEXT_ZIP).expect("cannot create zip file");
+
+    let mut buf = [0u8; 65536];
+    let mut downloaded: u64 = 0;
+    loop {
+        let n = reader.read(&mut buf).expect("read error");
+        if n == 0 { break; }
+        zip_file.write_all(&buf[..n]).expect("write error");
+        downloaded += n as u64;
+        eprint!("\r  {:.1} MB", downloaded as f64 / 1_000_000.0);
+    }
+    eprintln!("\r  {:.1} MB — done", downloaded as f64 / 1_000_000.0);
+    drop(zip_file);
+
+    eprintln!("Extracting wiki-news-300d-1M.vec …");
+    let zip_file = std::fs::File::open(FASTTEXT_ZIP).expect("cannot open zip");
+    let mut archive = zip::ZipArchive::new(zip_file).expect("invalid zip");
+    let mut entry = archive.by_name("wiki-news-300d-1M.vec")
+        .expect("wiki-news-300d-1M.vec not found in zip");
+    let mut out = std::fs::File::create(FASTTEXT_OUT).expect("cannot create output file");
+    std::io::copy(&mut entry, &mut out).expect("extraction failed");
+    eprintln!("Saved → {FASTTEXT_OUT}");
+
+    std::fs::remove_file(FASTTEXT_ZIP).expect("could not delete zip");
+    eprintln!("Deleted {FASTTEXT_ZIP}");
+}
+
 // ── GloVe ─────────────────────────────────────────────────────────────────────
 
 const GLOVE_URL:      &str = "https://nlp.stanford.edu/data/glove.6B.zip";

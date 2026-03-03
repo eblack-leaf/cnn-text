@@ -140,13 +140,14 @@ r#"Usage:
   fetch-agnews                      Download AG News → data/dataset.csv
   fetch-sms                         Download SMS Spam Collection (UCI)
   fetch-imdb                        Download Stanford IMDB → data/archive/IMDB Dataset.csv
-  fetch-glove [50|100|200|300]      Download Stanford GloVe embeddings
+  fetch-glove [50|100|200|300]      Download Stanford GloVe embeddings (~822 MB zip)
+  fetch-fasttext                    Download fastText wiki-news-300d-1M vectors (~600 MB)
 
   sweep <experiment.toml>           Run full hyperparameter sweep
 
   train [<model>] [options]         Train a single model
     --config <path>                 Load base hyperparams from TOML file
-    --arch <name>                   fasttext|kimcnn|bigru|transformer  [fasttext]
+    --arch <name>                   fasttext|kimcnn|bigru|transformer|cnn-text  [fasttext]
     --dataset <kind>                agnews|sms|imdb  [agnews]
     --data <path>                   Override dataset path
     --glove <path>                  GloVe file (omit to use BPE from scratch)
@@ -199,6 +200,11 @@ fn main() {
         Some("fetch-glove") => {
             let dim: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
             fetch::glove(dim);
+        }
+
+        // ── fetch-fasttext ────────────────────────────────────────────────────
+        Some("fetch-fasttext") => {
+            fetch::fasttext_wiki();
         }
 
         // ── predict <model> "text" ─────────────────────────────────────────────

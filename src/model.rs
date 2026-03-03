@@ -632,3 +632,124 @@ impl<B: Backend> Classify<B> for TinyTransformer<B> {
         ClassificationOutput::new(loss, logits, targets)
     }
 }
+
+// ── CnnText (custom — implement your architecture here) ────────────────────────
+//
+// Scaffold for a custom architecture. Wire it into experiment TOMLs via:
+//   arch = "cnn-text"
+//
+// Steps:
+//  1. Add whatever layers you need as fields on `CnnText<B>`.
+//  2. Build them in `CnnTextConfig::init` / `init_with_embeddings`.
+//  3. Replace the `todo!()` in `forward` with your forward pass.
+//  4. Update `count_params("cnn-text", ...)` in sweep.rs if you want accurate
+//     parameter counts in the results table.
+
+#[derive(Config, Debug)]
+pub struct CnnTextConfig {
+    pub vocab_size:  usize,
+    pub class_names: Vec<String>,
+    #[config(default = 100)]
+    pub embed_dim:   usize,
+    #[config(default = 128)]
+    pub num_filters: usize,
+    #[config(default = 0.5)]
+    pub dropout:     f64,
+    #[config(default = false)]
+    pub freeze_embeddings: bool,
+}
+
+impl CnnTextConfig {
+    pub fn num_classes(&self) -> usize { self.class_names.len() }
+
+    pub fn init<B: Backend>(&self, device: &B::Device) -> CnnText<B> {
+        let embedding = EmbeddingConfig::new(self.vocab_size, self.embed_dim).init(device);
+        let embedding = if self.freeze_embeddings { embedding.no_grad() } else { embedding };
+        CnnText {
+            embedding,
+            dropout:    DropoutConfig::new(self.dropout).init(),
+            classifier: LinearConfig::new(self.embed_dim, self.num_classes()).init(device),
+        }
+    }
+
+    pub fn init_with_embeddings<B: Backend>(
+        &self,
+        device:  &B::Device,
+        vectors: &[Vec<f32>],
+    ) -> CnnText<B> {
+        let vocab_size = vectors.len();
+        let embed_dim  = vectors[0].len();
+        let flat: Vec<f32> = vectors.iter().flatten().copied().collect();
+        let weight = Tensor::<B, 2>::from_data(
+            TensorData::new(flat, [vocab_size, embed_dim]),
+            device,
+        );
+        let embedding = EmbeddingConfig::new(vocab_size, embed_dim)
+            .init(device)
+            .load_record(EmbeddingRecord { weight: Param::initialized(ParamId::new(), weight) });
+        let embedding = if self.freeze_embeddings { embedding.no_grad() } else { embedding };
+        CnnText {
+            embedding,
+            dropout:    DropoutConfig::new(self.dropout).init(),
+            classifier: LinearConfig::new(embed_dim, self.num_classes()).init(device),
+        }
+    }
+
+    pub fn save_pretrained<B: Backend>(&self, model: &CnnText<B>, dir: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        model.clone()
+            .save_file(format!("{dir}/model"), &CompactRecorder::new())
+            .unwrap();
+        let mut json = serde_json::to_value(self).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("arch".to_string(), serde_json::json!("cnn-text"));
+        std::fs::write(
+            format!("{dir}/config.json"),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[allow(dead_code)]
+    pub fn from_pretrained<B: Backend>(dir: &str, device: &B::Device) -> (CnnText<B>, Self) {
+        let config: CnnTextConfig = serde_json::from_str(
+            &std::fs::read_to_string(format!("{dir}/config.json"))
+                .unwrap_or_else(|_| panic!("No config.json in {dir}")),
+        )
+        .unwrap();
+        let model = config
+            .init::<B>(device)
+            .load_file(format!("{dir}/model"), &CompactRecorder::new(), device)
+            .unwrap();
+        (model, config)
+    }
+}
+
+#[derive(Module, Debug)]
+pub struct CnnText<B: Backend> {
+    pub embedding:  Embedding<B>,
+    pub dropout:    Dropout,
+    pub classifier: Linear<B>,
+}
+
+impl<B: Backend> CnnText<B> {
+    pub fn forward(&self, _tokens: Tensor<B, 2, Int>) -> Tensor<B, 2> {
+        todo!("Implement CnnText::forward — replace embedding/dropout/classifier \
+               fields with your layers and write the forward pass here")
+    }
+}
+
+impl<B: Backend> Classify<B> for CnnText<B> {
+    fn forward_classification(
+        &self,
+        tokens:  Tensor<B, 2, Int>,
+        targets: Tensor<B, 1, Int>,
+    ) -> ClassificationOutput<B> {
+        let logits = self.forward(tokens);
+        let loss = CrossEntropyLossConfig::new()
+            .init(&logits.device())
+            .forward(logits.clone(), targets.clone());
+        ClassificationOutput::new(loss, logits, targets)
+    }
+}

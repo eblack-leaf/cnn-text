@@ -31,9 +31,10 @@ dropout      = 0.5
 # ── Per-architecture sweep blocks ─────────────────────────────────────────────
 
 [[runs]]
-arch  = "fasttext"
-embed = [32, 64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
-learning_rate = [1e-3, 5e-4]
+arch           = "fasttext"
+embed          = [32, 64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
+bigram_buckets = [0, 100000]
+learning_rate  = [1e-3, 5e-4]
 
 [[runs]]
 arch    = "kimcnn"

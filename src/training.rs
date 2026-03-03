@@ -16,7 +16,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::{
     data::{TextBatch, TextBatcher, TextDataset, Tokenizer},
     datasets::DatasetKind,
-    model::{BiGruConfig, Classify, FastTextConfig, KimCnnConfig, TinyTransformerConfig},
+    model::{BiGruConfig, Classify, CnnTextConfig, FastTextConfig, KimCnnConfig, TinyTransformerConfig},
 };
 
 // ── Training configuration ────────────────────────────────────────────────────
@@ -109,6 +109,8 @@ pub fn load_glove(
 
     for line in content.lines() {
         let (word, rest) = line.split_once(' ').unwrap();
+        // Skip fastText-style header line ("word_count dim"), e.g. "999994 300"
+        if word.parse::<usize>().is_ok() { continue; }
         if !corpus_words.contains(word) { continue; }
         let vec: Vec<f32> = rest
             .split_whitespace()
@@ -531,17 +533,33 @@ pub fn train<B: AutodiffBackend>(
             );
         }
 
+        "cnn-text" => {
+            let cc = CnnTextConfig::new(vocab_size, class_names)
+                .with_embed_dim(embed_dim)
+                .with_num_filters(config.num_filters)
+                .with_dropout(config.dropout)
+                .with_freeze_embeddings(config.freeze_embeddings);
+
+            let model = if let Some(ref matrix) = embedding_matrix {
+                std::fs::create_dir_all(format!("{model_dir}/.pretrained_init")).unwrap();
+                let cpu = cc.init_with_embeddings::<NdArray>(&Default::default(), matrix);
+                load_with_pretrained!(cc, cpu)
+            } else {
+                cc.init::<B>(&device)
+            };
+
+            let cc2 = cc.clone();
+            run_epochs::<B, _, _>(
+                model, config.optimizer.init(), config,
+                &*train_loader, &*val_loader, &*train_eval_loader,
+                train_batches, val_batches, &metrics_path, model_dir,
+                move |m, dir| cc2.save_pretrained(m, dir),
+            );
+        }
+
         _ => {
             // fasttext (default)
-            let effective_bigram_buckets = if config.bigram_buckets > 0 && embedding_matrix.is_none() {
-                eprintln!(
-                    "Warning: bigram_buckets ignored — bigrams are word-level features and \
-                     require word-level (GloVe) tokenization. Pass --glove to enable them."
-                );
-                0
-            } else {
-                config.bigram_buckets
-            };
+            let effective_bigram_buckets = config.bigram_buckets;
             let mc = FastTextConfig::new(vocab_size, class_names)
                 .with_embed_dim(embed_dim)
                 .with_bigram_buckets(effective_bigram_buckets)

@@ -20,10 +20,10 @@ num_epochs     = 15       # max epochs per run (early stopping may cut short)
 batch_size     = 128
 max_seq_len    = 64       # AG News avg ~35 tokens; 64 is sufficient
 val_ratio      = 0.15
-vocab_size     = 8192     # BPE vocab size (only used for BPE embed entries)
+vocab_size     = 16384    # BPE vocab size (only used for BPE embed entries)
 patience       = 5
 freeze         = false
-bigram_buckets = 0        # FastText bigrams: set > 0 (e.g. 100000) to enable
+bigram_buckets = 0        # global default; override per-arch in [[runs]]
 
 # ── Global arch defaults ──────────────────────────────────────────────────────
 # These apply when a [[runs]] block does not sweep the field.
@@ -46,9 +46,10 @@ dropout      = 0.5   # KimCNN / BiGRU classifier dropout
 #   embed = ["data/glove.6B.100d.txt", 32, "data/glove.6B.300d.txt", 64]
 
 [[runs]]
-arch  = "fasttext"
-embed = [32, 64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
-learning_rate = [1e-3, 5e-4]
+arch           = "fasttext"
+embed          = [32, 64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
+bigram_buckets = [0, 100000]
+learning_rate  = [1e-3, 5e-4]
 
 [[runs]]
 arch    = "kimcnn"
