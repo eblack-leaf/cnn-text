@@ -1,9 +1,14 @@
 use burn::{
     backend::NdArray,
-    tensor::{Int, Tensor, TensorData, activation::softmax},
+    tensor::{activation::softmax, Int, Tensor, TensorData},
 };
 
-use crate::{data::Tokenizer, model::{BiGru, FastText, KimCnn, TinyTransformer}};
+use crate::data::Tokenizer;
+use crate::model::bigru::BiGru;
+use crate::model::cnn_text::CnnText;
+use crate::model::fast_text::FastText;
+use crate::model::kimcnn::KimCnn;
+use crate::model::transformer::TinyTransformer;
 
 type B = NdArray;
 
@@ -30,6 +35,10 @@ pub fn predict(text: &str, model_dir: &str) -> (String, f32) {
     );
 
     let (logits, class_names) = match arch {
+        "cnn-text" => {
+            let (model, cfg) = CnnText::<B>::from_pretrained(model_dir, &device);
+            (model.forward(tensor), cfg.class_names)
+        }
         "kimcnn" => {
             let (model, cfg) = KimCnn::<B>::from_pretrained(model_dir, &device);
             (model.forward(tensor), cfg.class_names)

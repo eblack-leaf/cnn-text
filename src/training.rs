@@ -4,11 +4,11 @@ use std::time::Instant;
 use burn::{
     backend::NdArray,
     config::Config,
-    prelude::Module,
     data::dataloader::{DataLoader, DataLoaderBuilder},
-    optim::{AdamWConfig, GradientsParams, Optimizer},
-    tensor::backend::{AutodiffBackend, Backend},
     module::AutodiffModule,
+    optim::{AdamWConfig, GradientsParams, Optimizer},
+    prelude::Module,
+    tensor::backend::{AutodiffBackend, Backend},
     tensor::ElementConversion,
 };
 use burn::data::dataset::Dataset;
@@ -16,9 +16,13 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::{
     data::{TextBatch, TextBatcher, TextDataset, Tokenizer},
     datasets::DatasetKind,
-    model::{BiGruConfig, Classify, CnnTextConfig, FastTextConfig, KimCnnConfig, TinyTransformerConfig},
+    model::Classify,
 };
-
+use crate::model::bigru::BiGruConfig;
+use crate::model::cnn_text::CnnTextConfig;
+use crate::model::fast_text::FastTextConfig;
+use crate::model::kimcnn::KimCnnConfig;
+use crate::model::transformer::TinyTransformerConfig;
 // ── Training configuration ────────────────────────────────────────────────────
 
 #[derive(Config, Debug)]
@@ -84,6 +88,39 @@ pub struct TrainingConfig {
     pub warmup_steps: usize,
 }
 
+// ── Tokenizer / embedding cache ───────────────────────────────────────────────
+//
+// All runs in a sweep that share the same (dataset_path, vocab_size) reuse the
+// same BPE tokenizer — training it once saves 30-60s per run.
+// GloVe/fastText runs that share (glove_path, dataset_path) reuse the filtered
+// word vectors — avoids re-reading a 300MB+ file for every run.
+
+const CACHE_DIR: &str = "data/.cache";
+
+/// Stable cache path for a BPE tokenizer.
+/// Key: (dataset_path, vocab_size) — same text corpus + same vocab size = same tokenizer.
+fn bpe_cache_path(dataset_path: &str, vocab_size: usize) -> String {
+    let key: String = dataset_path
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("{CACHE_DIR}/bpe_{key}_{vocab_size}.json")
+}
+
+/// Stable cache path for filtered GloVe/fastText vectors.
+/// Key: (glove file stem, dataset_path).
+fn glove_cache_path(glove_path: &str, dataset_path: &str) -> String {
+    let stem = std::path::Path::new(glove_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("glove");
+    let dkey: String = dataset_path
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("{CACHE_DIR}/glove_{stem}_{dkey}.txt")
+}
+
 // ── GloVe helpers ─────────────────────────────────────────────────────────────
 
 fn collect_words_from_pairs(pairs: &[(String, String)]) -> HashSet<String> {
@@ -124,6 +161,60 @@ pub fn load_glove(
         "Kept {}/{} GloVe words seen in corpus",
         words.len(), corpus_words.len(),
     );
+    (words, vecs)
+}
+
+/// Load GloVe/fastText vectors, caching the corpus-filtered result on first use.
+///
+/// The full vector file (300MB–1GB) is read once per (glove_path, dataset_path)
+/// combination. Subsequent runs load only the filtered subset, which is much
+/// smaller and reads in a fraction of the time.
+fn load_glove_cached(
+    path:         &str,
+    corpus_words: &HashSet<String>,
+    dataset_path: &str,
+) -> (Vec<String>, Vec<Vec<f32>>) {
+    let cache = glove_cache_path(path, dataset_path);
+
+    if std::path::Path::new(&cache).exists() {
+        eprintln!("Loading cached vectors from {cache} …");
+        let content = std::fs::read_to_string(&cache)
+            .unwrap_or_else(|e| panic!("Cannot read vector cache {cache}: {e}"));
+        let mut words = Vec::new();
+        let mut vecs  = Vec::new();
+        for line in content.lines() {
+            if line.is_empty() { continue; }
+            let (word, rest) = line.split_once(' ').unwrap();
+            let vec: Vec<f32> = rest
+                .split_whitespace()
+                .map(|v| v.parse().expect("bad float in cache"))
+                .collect();
+            words.push(word.to_string());
+            vecs.push(vec);
+        }
+        eprintln!("  {} cached vectors loaded", words.len());
+        return (words, vecs);
+    }
+
+    // Cache miss — load the full file and filter.
+    let (words, vecs) = load_glove(path, corpus_words);
+
+    // Write filtered vectors in the same text format.
+    std::fs::create_dir_all(CACHE_DIR).ok();
+    let mut out = std::io::BufWriter::new(
+        std::fs::File::create(&cache)
+            .unwrap_or_else(|e| panic!("Cannot create cache {cache}: {e}")),
+    );
+    use std::io::Write;
+    for (word, vec) in words.iter().zip(vecs.iter()) {
+        let floats = vec.iter()
+            .map(|f| format!("{f}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        writeln!(out, "{word} {floats}").unwrap();
+    }
+    eprintln!("Saved vector cache → {cache}");
+
     (words, vecs)
 }
 
@@ -349,7 +440,7 @@ pub fn train<B: AutodiffBackend>(
                 .cloned()
                 .collect();
             let corpus_words = collect_words_from_pairs(&all_pairs);
-            let (glove_words, glove_vecs) = load_glove(glove, &corpus_words);
+            let (glove_words, glove_vecs) = load_glove_cached(glove, &corpus_words, dataset_path);
             let embed_dim = glove_vecs[0].len();
             let zeros = vec![0.0f32; embed_dim];
             let mut matrix = vec![zeros.clone(), zeros];
@@ -381,17 +472,28 @@ pub fn train<B: AutodiffBackend>(
             );
             (train_ds, val_ds, Some(matrix), class_names, vocab_size, embed_dim)
         } else {
+            // Use a shared cache path so the BPE tokenizer is trained only once
+            // per (dataset, vocab_size) across all sweep runs.
+            std::fs::create_dir_all(CACHE_DIR).ok();
+            let cache_tok = bpe_cache_path(dataset_path, config.vocab_size);
+
             let (train_ds, val_ds, tokenizer, class_names) = if has_test_split {
                 TextDataset::from_split_pairs(
                     train_pairs, test_pairs.unwrap(),
-                    config.max_seq_len, config.vocab_size, &tokenizer_path,
+                    config.max_seq_len, config.vocab_size, &cache_tok,
                 )
             } else {
                 TextDataset::from_pairs(
                     train_pairs,
-                    config.max_seq_len, config.val_ratio, config.vocab_size, &tokenizer_path,
+                    config.max_seq_len, config.val_ratio, config.vocab_size, &cache_tok,
                 )
             };
+
+            // Copy tokenizer to model dir so inference (predict) can load it.
+            if !std::path::Path::new(&tokenizer_path).exists() {
+                std::fs::copy(&cache_tok, &tokenizer_path).ok();
+            }
+
             let vocab_size = tokenizer.vocab_size();
             let embed_dim  = config.embed_dim;
             println!(
@@ -534,7 +636,7 @@ pub fn train<B: AutodiffBackend>(
         }
 
         "cnn-text" => {
-            let cc = CnnTextConfig::new(vocab_size, class_names)
+            let cc = CnnTextConfig::new(config.max_seq_len, vocab_size, class_names)
                 .with_embed_dim(embed_dim)
                 .with_num_filters(config.num_filters)
                 .with_dropout(config.dropout)
@@ -553,7 +655,7 @@ pub fn train<B: AutodiffBackend>(
                 model, config.optimizer.init(), config,
                 &*train_loader, &*val_loader, &*train_eval_loader,
                 train_batches, val_batches, &metrics_path, model_dir,
-                move |m, dir| cc2.save_pretrained(m, dir),
+                move |m, dir| m.save_pretrained(&cc2, dir),
             );
         }
 

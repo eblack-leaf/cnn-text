@@ -1,0 +1,53 @@
+# experiment.toml — Edge-Device Text Classification Sweep
+#
+# Goal: find the smallest / fastest model that can be trained on-device
+# (data never leaves the consumer device) while remaining accurate enough
+# to be useful.
+#
+# Run with:
+#   cargo run --release -- sweep experiment.toml
+#
+# Results are written to artifacts/sweep_results.csv and printed as a
+# sorted table at the end.
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+# Fetch AG News first:  cargo run -- fetch-agnews
+dataset      = "data/dataset.csv"
+dataset_kind = "agnews"   # agnews | sms | imdb
+
+# ── Fixed training hyperparams ────────────────────────────────────────────────
+num_epochs     = 15       # max epochs per run (early stopping may cut short)
+batch_size     = 128
+max_seq_len    = 64       # AG News avg ~35 tokens; 64 is sufficient
+val_ratio      = 0.15
+vocab_size     = 16384    # BPE vocab size (only used for BPE embed entries)
+patience       = 5
+freeze         = false
+bigram_buckets = 0        # global default; override per-arch in [[runs]]
+
+# ── Global arch defaults ──────────────────────────────────────────────────────
+# These apply when a [[runs]] block does not sweep the field.
+num_filters  = 128
+hidden_dim   = 128
+num_heads    = 4
+num_layers   = 2
+d_ff         = 256
+attn_dropout = 0.1   # Transformer attention dropout
+dropout      = 0.5   # KimCNN / BiGRU classifier dropout
+
+# ── Per-architecture sweep blocks ────────────────────────────────────────────
+#
+# Each [[runs]] block declares ONLY the axes that matter for that arch.
+# The `embed` field accepts a mixed list:
+#   integers → BPE embeddings of that dimension
+#   strings  → GloVe file paths (dim is inferred from the filename)
+#
+# Example mixing GloVe and BPE in one block:
+#   embed = ["data/glove.6B.100d.txt", 32, "data/glove.6B.300d.txt", 64]
+
+[[runs]]
+arch          = "cnn-text"
+embed         = [32, 64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
+num_filters   = [64, 128]
+dropout       = [0.3, 0.5]
+learning_rate = [1e-3, 5e-4]
