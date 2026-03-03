@@ -98,17 +98,32 @@ The embedding table is almost everything — the actual model is tiny. Kim CNN's
 
 ---
 
-## Setup
+## Datasets
 
-### Dataset
+### AG News (default)
 
 ```bash
 cargo run -- fetch-agnews
 ```
 
-Writes `data/dataset.csv` — headerless `label,text` per line.
+Writes `data/dataset.csv` — headerless `label,text` per line. 4-class news topic classification (~120k samples).
 
-### GloVe vectors (optional)
+### Amazon Review Polarity
+
+Binary sentiment from Amazon product reviews. 3.6M train / 400k test, pre-split.
+Place the Kaggle archive at `data/amazon_review_polarity_csv/` (contains `train.csv` and `test.csv`).
+
+### SMS Spam Collection
+
+Ham/spam binary classification. ~5 500 samples, tab-separated.
+Place `SMSSpamCollection` at `data/sms+spam+collection/SMSSpamCollection`.
+
+### IMDB
+
+Binary movie-review sentiment. 50k samples with CSV header. HTML `<br />` tags are stripped.
+Place `IMDB Dataset.csv` at `data/archive/IMDB Dataset.csv`.
+
+### GloVe vectors (optional, any dataset)
 
 ```bash
 cargo run -- fetch-glove          # 100d (default)
@@ -122,10 +137,31 @@ Options: 50, 100 (default), 200, 300.
 
 ## Train
 
+### Dataset flag
+
+Use `--dataset` to select the source. The path defaults to the standard location for each dataset; override it with `--data`.
+
+| `--dataset` | Default path |
+|---|---|
+| `custom` (default) | `data/dataset.csv` |
+| `amazon` | `data/amazon_review_polarity_csv/` |
+| `sms` | `data/sms+spam+collection/SMSSpamCollection` |
+| `imdb` | `data/archive/IMDB Dataset.csv` |
+
+```bash
+# custom dataset at a non-default path
+cargo run --release -- train mymodel --dataset custom --data /path/to/my.csv
+```
+
+Amazon uses its own train/test split as the validation set; all other datasets split by `val_ratio` (default 15%).
+
 ### FastText, BPE
 
 ```bash
 cargo run --release -- train <model>
+cargo run --release -- train <model> --dataset imdb
+cargo run --release -- train <model> --dataset sms
+cargo run --release -- train <model> --dataset amazon
 ```
 
 *(bigrams are on by default — set `bigram_buckets = 0` in `main.rs` to disable)*
@@ -134,6 +170,7 @@ cargo run --release -- train <model>
 
 ```bash
 cargo run --release -- train <model> --glove data/glove.6B.100d.txt
+cargo run --release -- train <model> --dataset imdb --glove data/glove.6B.100d.txt
 ```
 
 ### FastText + bigrams, GloVe

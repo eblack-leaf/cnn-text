@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 
 mod data;
+mod datasets;
 mod fetch;
 mod infer;
 mod model;
@@ -40,7 +41,9 @@ fn main() {
             println!("{class}  ({:.1}%)", confidence * 100.0);
         }
 
-        // cargo run -- train [<model>] [--arch fasttext|kimcnn] [--glove <path>] [--freeze]
+        // cargo run -- train [<model>] [--arch fasttext|kimcnn|bigru|transformer]
+        //                   [--dataset custom|amazon|sms|imdb] [--data <path>]
+        //                   [--glove <path>] [--freeze]
         Some("train") | None => {
             let model = args.get(2)
                 .filter(|a| !a.starts_with("--"))
@@ -57,6 +60,23 @@ fn main() {
                 .map(|w| w[1].as_str());
 
             let freeze = args.iter().any(|a| a == "--freeze");
+
+            // --dataset custom|amazon|sms|imdb  (default: custom)
+            let dataset_name = args.windows(2)
+                .find(|w| w[0] == "--dataset")
+                .map(|w| w[1].as_str())
+                .unwrap_or("custom");
+            let dataset_kind = datasets::DatasetKind::from_str(dataset_name)
+                .unwrap_or_else(|| {
+                    eprintln!("Unknown dataset '{dataset_name}'. Valid: custom, amazon, sms, imdb");
+                    std::process::exit(1);
+                });
+
+            // --data <path> overrides the default path for the chosen dataset
+            let dataset_path = args.windows(2)
+                .find(|w| w[0] == "--data")
+                .map(|w| w[1].as_str())
+                .unwrap_or_else(|| dataset_kind.default_path());
 
             // Transformer needs a lower LR and warmup to train stably.
             let (lr, warmup_steps) = if arch == "transformer" {
@@ -79,7 +99,8 @@ fn main() {
                 .with_warmup_steps(warmup_steps);
 
             train::<AutodiffBackend>(
-                "data/dataset.csv",
+                dataset_path,
+                &dataset_kind,
                 glove,
                 &config,
                 arch,
@@ -89,7 +110,7 @@ fn main() {
         }
 
         Some(cmd) => eprintln!(
-            "Unknown command: {cmd}\nUsage: fetch-agnews | fetch-glove [dim] | train [model] [--arch fasttext|kimcnn|bigru|transformer] | predict <model> \"<text>\""
+            "Unknown command: {cmd}\nUsage: fetch-agnews | fetch-glove [dim] | train [model] [--arch fasttext|kimcnn|bigru|transformer] [--dataset custom|amazon|sms|imdb] [--data <path>] | predict <model> \"<text>\""
         ),
     }
 }

@@ -15,6 +15,7 @@ use burn::data::dataset::Dataset;
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::{
     data::{TextBatch, TextBatcher, TextDataset, Tokenizer},
+    datasets::DatasetKind,
     model::{BiGruConfig, Classify, FastTextConfig, KimCnnConfig, TinyTransformerConfig},
 };
 
@@ -85,15 +86,11 @@ pub struct TrainingConfig {
 
 // ── GloVe helpers ─────────────────────────────────────────────────────────────
 
-fn collect_corpus_words(data_path: &str) -> HashSet<String> {
-    let content = std::fs::read_to_string(data_path)
-        .unwrap_or_else(|e| panic!("Cannot read {data_path}: {e}"));
+fn collect_words_from_pairs(pairs: &[(String, String)]) -> HashSet<String> {
     let mut words = HashSet::new();
-    for line in content.lines() {
-        if let Some((_, text)) = line.split_once(',') {
-            for word in text.split_whitespace() {
-                words.insert(word.to_lowercase());
-            }
+    for (_, text) in pairs {
+        for word in text.split_whitespace() {
+            words.insert(word.to_lowercase());
         }
     }
     words
@@ -322,12 +319,13 @@ fn run_epochs<B, M, O>(
 // ── Training entry point ──────────────────────────────────────────────────────
 
 pub fn train<B: AutodiffBackend>(
-    data_path:  &str,
-    glove_path: Option<&str>,
-    config:     &TrainingConfig,
-    arch:       &str,
-    model_dir:  &str,
-    device:     B::Device,
+    dataset_path: &str,
+    dataset_kind: &DatasetKind,
+    glove_path:   Option<&str>,
+    config:       &TrainingConfig,
+    arch:         &str,
+    model_dir:    &str,
+    device:       B::Device,
 ) where
     B::InnerBackend: Backend,
 {
@@ -338,9 +336,17 @@ pub fn train<B: AutodiffBackend>(
 
     // ── Data ──────────────────────────────────────────────────────────────────
 
+    let (train_pairs, test_pairs) = dataset_kind.load(dataset_path);
+    let has_test_split = test_pairs.is_some();
+
     let (train_ds, val_ds, embedding_matrix, class_names, vocab_size, embed_dim) =
         if let Some(glove) = glove_path {
-            let corpus_words = collect_corpus_words(data_path);
+            // Collect vocabulary from all available pairs.
+            let all_pairs: Vec<_> = train_pairs.iter()
+                .chain(test_pairs.iter().flatten())
+                .cloned()
+                .collect();
+            let corpus_words = collect_words_from_pairs(&all_pairs);
             let (glove_words, glove_vecs) = load_glove(glove, &corpus_words);
             let embed_dim = glove_vecs[0].len();
             let zeros = vec![0.0f32; embed_dim];
@@ -360,8 +366,12 @@ pub fn train<B: AutodiffBackend>(
                 tok
             };
 
-            let (train_ds, val_ds, class_names) =
-                TextDataset::from_csv_tokenized(data_path, &tokenizer, config.val_ratio);
+            let (train_ds, val_ds, class_names) = if has_test_split {
+                TextDataset::from_split_pairs_tokenized(
+                    train_pairs, test_pairs.unwrap(), &tokenizer)
+            } else {
+                TextDataset::from_pairs_tokenized(train_pairs, &tokenizer, config.val_ratio)
+            };
             let vocab_size = matrix.len();
             println!(
                 "Loaded: {} train / {} val — {} classes: {:?}",
@@ -369,13 +379,17 @@ pub fn train<B: AutodiffBackend>(
             );
             (train_ds, val_ds, Some(matrix), class_names, vocab_size, embed_dim)
         } else {
-            let (train_ds, val_ds, tokenizer, class_names) = TextDataset::from_csv(
-                data_path,
-                config.max_seq_len,
-                config.val_ratio,
-                config.vocab_size,
-                &tokenizer_path,
-            );
+            let (train_ds, val_ds, tokenizer, class_names) = if has_test_split {
+                TextDataset::from_split_pairs(
+                    train_pairs, test_pairs.unwrap(),
+                    config.max_seq_len, config.vocab_size, &tokenizer_path,
+                )
+            } else {
+                TextDataset::from_pairs(
+                    train_pairs,
+                    config.max_seq_len, config.val_ratio, config.vocab_size, &tokenizer_path,
+                )
+            };
             let vocab_size = tokenizer.vocab_size();
             let embed_dim  = config.embed_dim;
             println!(

@@ -155,7 +155,151 @@ pub struct TextDataset {
     samples: Vec<TextSample>,
 }
 
+// ── Shared helpers ────────────────────────────────────────────────────────────
+
+fn sorted_class_names<'a>(labels: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut names: Vec<String> = labels.map(|l| l.to_string()).collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn class_idx_map(class_names: &[String]) -> HashMap<&str, i32> {
+    class_names.iter().enumerate().map(|(i, c)| (c.as_str(), i as i32)).collect()
+}
+
+fn pairs_to_samples(pairs: &[(String, String)], tokenizer: &Tokenizer) -> (Vec<TextSample>, Vec<String>) {
+    let class_names = sorted_class_names(pairs.iter().map(|(l, _)| l.as_str()));
+    let class2idx   = class_idx_map(&class_names);
+    let samples = pairs.iter()
+        .map(|(l, t)| TextSample { tokens: tokenizer.encode(t), label: class2idx[l.as_str()] })
+        .collect();
+    (samples, class_names)
+}
+
+fn shuffle_and_split(mut samples: Vec<TextSample>, val_ratio: f32) -> (TextDataset, TextDataset) {
+    let mut rng: u64 = 42;
+    for i in (1..samples.len()).rev() {
+        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+        let j = (rng as usize) % (i + 1);
+        samples.swap(i, j);
+    }
+    let n_val = ((samples.len() as f32) * val_ratio).round() as usize;
+    (
+        TextDataset { samples: samples[n_val..].to_vec() },
+        TextDataset { samples: samples[..n_val].to_vec() },
+    )
+}
+
+fn load_or_train_tokenizer<'a>(
+    texts:          impl Iterator<Item = &'a str>,
+    vocab_size:     usize,
+    max_len:        usize,
+    tokenizer_path: &str,
+) -> Tokenizer {
+    if std::path::Path::new(tokenizer_path).exists() {
+        println!("Loading tokenizer from {tokenizer_path}");
+        Tokenizer::load(tokenizer_path)
+    } else {
+        println!("Training BPE tokenizer…");
+        if let Some(parent) = std::path::Path::new(tokenizer_path).parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let text_vec: Vec<String> = texts.map(|s| s.to_string()).collect();
+        let tok = Tokenizer::train(&text_vec, vocab_size, max_len);
+        tok.save(tokenizer_path);
+        println!("Saved tokenizer: vocab_size={}", tok.vocab_size());
+        tok
+    }
+}
+
 impl TextDataset {
+    // ── Pair-based constructors (used by DatasetKind loaders) ─────────────────
+
+    /// Build train/val datasets from pre-parsed `(label, text)` pairs.
+    /// Trains (or loads) a BPE tokenizer saved to `tokenizer_path`.
+    pub fn from_pairs(
+        pairs:          Vec<(String, String)>,
+        max_len:        usize,
+        val_ratio:      f32,
+        vocab_size:     usize,
+        tokenizer_path: &str,
+    ) -> (Self, Self, Tokenizer, Vec<String>) {
+        let tokenizer = load_or_train_tokenizer(
+            pairs.iter().map(|(_, t)| t.as_str()),
+            vocab_size, max_len, tokenizer_path,
+        );
+        let (samples, class_names) = pairs_to_samples(&pairs, &tokenizer);
+        let (train_ds, val_ds) = shuffle_and_split(samples, val_ratio);
+        (train_ds, val_ds, tokenizer, class_names)
+    }
+
+    /// Build train/val datasets from pre-split pair sets (e.g. Amazon).
+    /// The test set is used as-is for validation (no further splitting).
+    /// Trains (or loads) a BPE tokenizer on the union of both sets.
+    pub fn from_split_pairs(
+        train_pairs:    Vec<(String, String)>,
+        test_pairs:     Vec<(String, String)>,
+        max_len:        usize,
+        vocab_size:     usize,
+        tokenizer_path: &str,
+    ) -> (Self, Self, Tokenizer, Vec<String>) {
+        let all_texts = train_pairs.iter().chain(test_pairs.iter()).map(|(_, t)| t.as_str());
+        let tokenizer = load_or_train_tokenizer(all_texts, vocab_size, max_len, tokenizer_path);
+
+        let all_pairs: Vec<_> = train_pairs.iter().chain(test_pairs.iter()).collect();
+        let class_names = sorted_class_names(all_pairs.iter().map(|(l, _)| l.as_str()));
+        let class2idx   = class_idx_map(&class_names);
+
+        let train_ds = Self {
+            samples: train_pairs.iter()
+                .map(|(l, t)| TextSample { tokens: tokenizer.encode(t), label: class2idx[l.as_str()] })
+                .collect(),
+        };
+        let val_ds = Self {
+            samples: test_pairs.iter()
+                .map(|(l, t)| TextSample { tokens: tokenizer.encode(t), label: class2idx[l.as_str()] })
+                .collect(),
+        };
+        (train_ds, val_ds, tokenizer, class_names)
+    }
+
+    /// Pair-based equivalent of `from_csv_tokenized` (GloVe path).
+    pub fn from_pairs_tokenized(
+        pairs:     Vec<(String, String)>,
+        tokenizer: &Tokenizer,
+        val_ratio: f32,
+    ) -> (Self, Self, Vec<String>) {
+        let (samples, class_names) = pairs_to_samples(&pairs, tokenizer);
+        let (train_ds, val_ds) = shuffle_and_split(samples, val_ratio);
+        (train_ds, val_ds, class_names)
+    }
+
+    /// Pair-based equivalent of `from_csv_tokenized` with pre-split sets.
+    pub fn from_split_pairs_tokenized(
+        train_pairs: Vec<(String, String)>,
+        test_pairs:  Vec<(String, String)>,
+        tokenizer:   &Tokenizer,
+    ) -> (Self, Self, Vec<String>) {
+        let all_pairs: Vec<_> = train_pairs.iter().chain(test_pairs.iter()).collect();
+        let class_names = sorted_class_names(all_pairs.iter().map(|(l, _)| l.as_str()));
+        let class2idx   = class_idx_map(&class_names);
+
+        let train_ds = Self {
+            samples: train_pairs.iter()
+                .map(|(l, t)| TextSample { tokens: tokenizer.encode(t), label: class2idx[l.as_str()] })
+                .collect(),
+        };
+        let val_ds = Self {
+            samples: test_pairs.iter()
+                .map(|(l, t)| TextSample { tokens: tokenizer.encode(t), label: class2idx[l.as_str()] })
+                .collect(),
+        };
+        (train_ds, val_ds, class_names)
+    }
+
+    // ── CSV constructors (original interface) ─────────────────────────────────
+
     /// Load from a **headerless** CSV with format: `label,text`
     ///
     /// Trains (or loads) a BPE tokenizer saved to `tokenizer_path`.
