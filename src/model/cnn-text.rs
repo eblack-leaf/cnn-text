@@ -13,19 +13,24 @@ use crate::model::Classify;
 // ── CnnText ────────────────────────────────────────────────────────────────────
 //
 //   tokens [B, L]
-//     → TokenEmbed + PosEmbed  [B, L, E]
-//     → permute                [B, E, L]
-//     → Conv1d(k=3) → ReLU    [B, F, L-2]  ┐
-//     → Conv1d(k=4) → ReLU    [B, F, L-3]  ├─ per-branch attention pool → [B, F] each
-//     → Conv1d(k=5) → ReLU    [B, F, L-4]  ┘
+//     → Embedding          [B, L, E]
+//     → permute            [B, E, L]
+//     → Conv1d(k=3) → ReLU [B, F, L-2]  ┐
+//     → Conv1d(k=4) → ReLU [B, F, L-3]  ├─ per-branch attention pool → [B, F] each
+//     → Conv1d(k=5) → ReLU [B, F, L-4]  ┘
 //     → cat [B, 3F]  →  Dropout  →  Linear [B, C]
 //
-// Attention pool (shared scorer):
+// Conv1d is already order-sensitive within each window (W[0], W[1], W[2] are
+// distinct weight matrices), so "not good one" ≠ "one not good" without any
+// positional embedding. Global positional embeddings are intentionally omitted —
+// they would make the same n-gram pattern produce different activations depending
+// on where in the sentence it appears, which hurts generalisation.
+//
+// Attention pool (per-branch scorer):
 //   x [B, L', F]  →  Linear(F, 1)  →  softmax over L'  →  weighted sum  →  [B, F]
 
 #[derive(Config, Debug)]
 pub struct CnnTextConfig {
-    pub max_seq_len: usize,
     pub vocab_size:  usize,
     pub class_names: Vec<String>,
     #[config(default = 100)]
@@ -46,15 +51,14 @@ impl CnnTextConfig {
         let embedding = if self.freeze_embeddings { embedding.no_grad() } else { embedding };
         CnnText {
             embedding,
-            positional:  EmbeddingConfig::new(self.max_seq_len, self.embed_dim).init(device),
-            conv3:       Conv1dConfig::new(self.embed_dim, self.num_filters, 3).init(device),
-            conv4:       Conv1dConfig::new(self.embed_dim, self.num_filters, 4).init(device),
-            conv5:       Conv1dConfig::new(self.embed_dim, self.num_filters, 5).init(device),
-            attn3:       LinearConfig::new(self.num_filters, 1).init(device),
-            attn4:       LinearConfig::new(self.num_filters, 1).init(device),
-            attn5:       LinearConfig::new(self.num_filters, 1).init(device),
-            dropout:     DropoutConfig::new(self.dropout).init(),
-            classifier:  LinearConfig::new(self.num_filters * 3, self.num_classes()).init(device),
+            conv3:      Conv1dConfig::new(self.embed_dim, self.num_filters, 3).init(device),
+            conv4:      Conv1dConfig::new(self.embed_dim, self.num_filters, 4).init(device),
+            conv5:      Conv1dConfig::new(self.embed_dim, self.num_filters, 5).init(device),
+            attn3:      LinearConfig::new(self.num_filters, 1).init(device),
+            attn4:      LinearConfig::new(self.num_filters, 1).init(device),
+            attn5:      LinearConfig::new(self.num_filters, 1).init(device),
+            dropout:    DropoutConfig::new(self.dropout).init(),
+            classifier: LinearConfig::new(self.num_filters * 3, self.num_classes()).init(device),
         }
     }
 
@@ -76,24 +80,37 @@ impl CnnTextConfig {
         let embedding = if self.freeze_embeddings { embedding.no_grad() } else { embedding };
         CnnText {
             embedding,
-            positional:  EmbeddingConfig::new(self.max_seq_len, embed_dim).init(device),
-            conv3:       Conv1dConfig::new(embed_dim, self.num_filters, 3).init(device),
-            conv4:       Conv1dConfig::new(embed_dim, self.num_filters, 4).init(device),
-            conv5:       Conv1dConfig::new(embed_dim, self.num_filters, 5).init(device),
-            attn3:       LinearConfig::new(self.num_filters, 1).init(device),
-            attn4:       LinearConfig::new(self.num_filters, 1).init(device),
-            attn5:       LinearConfig::new(self.num_filters, 1).init(device),
-            dropout:     DropoutConfig::new(self.dropout).init(),
-            classifier:  LinearConfig::new(self.num_filters * 3, self.num_classes()).init(device),
+            conv3:      Conv1dConfig::new(embed_dim, self.num_filters, 3).init(device),
+            conv4:      Conv1dConfig::new(embed_dim, self.num_filters, 4).init(device),
+            conv5:      Conv1dConfig::new(embed_dim, self.num_filters, 5).init(device),
+            attn3:      LinearConfig::new(self.num_filters, 1).init(device),
+            attn4:      LinearConfig::new(self.num_filters, 1).init(device),
+            attn5:      LinearConfig::new(self.num_filters, 1).init(device),
+            dropout:    DropoutConfig::new(self.dropout).init(),
+            classifier: LinearConfig::new(self.num_filters * 3, self.num_classes()).init(device),
         }
     }
 
+    pub fn save_pretrained<B: Backend>(&self, model: &CnnText<B>, dir: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        model.clone()
+            .save_file(format!("{dir}/model"), &CompactRecorder::new())
+            .unwrap();
+        let mut json = serde_json::to_value(self).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("arch".to_string(), serde_json::json!("cnn-text"));
+        std::fs::write(
+            format!("{dir}/config.json"),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
+    }
 }
 
 #[derive(Module, Debug)]
 pub struct CnnText<B: Backend> {
     embedding:  Embedding<B>,
-    positional: Embedding<B>,
     conv3:      Conv1d<B>,
     conv4:      Conv1d<B>,
     conv5:      Conv1d<B>,
@@ -117,44 +134,22 @@ impl<B: Backend> CnnText<B> {
     }
 
     pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 2> {
-        let [_batch_size, seq_len] = tokens.dims();
-        let device = tokens.device();
+        let x = self.embedding.forward(tokens).swap_dims(1, 2); // [B, E, L]
 
-        // 1. Token + positional embeddings → [B, E, L]
-        let pos_ids = Tensor::<B, 1, Int>::arange(0..seq_len as i64, &device)
-            .unsqueeze::<2>();                                               // [1, L]
-        let x = (self.embedding.forward(tokens) + self.positional.forward(pos_ids))
-            .swap_dims(1, 2);                                                // [B, E, L]
-
-        // 2. Multi-scale convs with ReLU
         let c3 = activation::relu(self.conv3.forward(x.clone())); // [B, F, L-2]
         let c4 = activation::relu(self.conv4.forward(x.clone())); // [B, F, L-3]
         let c5 = activation::relu(self.conv5.forward(x));         // [B, F, L-4]
 
-        // 3. Per-branch attention pooling → [B, F] each
         let p3 = Self::attn_pool(&self.attn3, c3);
         let p4 = Self::attn_pool(&self.attn4, c4);
         let p5 = Self::attn_pool(&self.attn5, c5);
 
-        // 4. Concatenate → [B, 3F], dropout, classify
         let x = self.dropout.forward(Tensor::cat(vec![p3, p4, p5], 1));
         self.classifier.forward(x)
     }
 
     pub fn save_pretrained(&self, config: &CnnTextConfig, dir: &str) {
-        std::fs::create_dir_all(dir).unwrap();
-        self.clone()
-            .save_file(format!("{dir}/model"), &CompactRecorder::new())
-            .unwrap();
-        let mut json = serde_json::to_value(config).unwrap();
-        json.as_object_mut()
-            .unwrap()
-            .insert("arch".to_string(), serde_json::json!("cnn-text"));
-        std::fs::write(
-            format!("{dir}/config.json"),
-            serde_json::to_string_pretty(&json).unwrap(),
-        )
-        .unwrap();
+        config.save_pretrained(self, dir);
     }
 
     pub fn from_pretrained(dir: &str, device: &B::Device) -> (Self, CnnTextConfig) {

@@ -636,7 +636,7 @@ pub fn train<B: AutodiffBackend>(
         }
 
         "cnn-text" => {
-            let cc = CnnTextConfig::new(config.max_seq_len, vocab_size, class_names)
+            let cc = CnnTextConfig::new(vocab_size, class_names)
                 .with_embed_dim(embed_dim)
                 .with_num_filters(config.num_filters)
                 .with_dropout(config.dropout)

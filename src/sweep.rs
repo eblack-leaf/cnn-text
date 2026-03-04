@@ -358,13 +358,12 @@ pub fn count_params(
             pos_emb + (mha + ffn + ln) * num_layers + cls
         }
         "cnn-text" => {
-            let pos_emb = max_seq_len * embed_dim;
-            let conv3   = num_filters * embed_dim * 3 + num_filters;
-            let conv4   = num_filters * embed_dim * 4 + num_filters;
-            let conv5   = num_filters * embed_dim * 5 + num_filters;
-            let attn    = 3 * (num_filters + 1);       // three Linear(F, 1) scorers
-            let cls     = num_filters * 3 * num_classes + num_classes;
-            pos_emb + conv3 + conv4 + conv5 + attn + cls
+            let conv3 = num_filters * embed_dim * 3 + num_filters;
+            let conv4 = num_filters * embed_dim * 4 + num_filters;
+            let conv5 = num_filters * embed_dim * 5 + num_filters;
+            let attn  = 3 * (num_filters + 1);         // three Linear(F, 1) scorers
+            let cls   = num_filters * 3 * num_classes + num_classes;
+            conv3 + conv4 + conv5 + attn + cls
         }
 
         _ => 0,

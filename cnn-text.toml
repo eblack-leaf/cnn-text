@@ -47,7 +47,7 @@ dropout      = 0.5   # KimCNN / BiGRU classifier dropout
 
 [[runs]]
 arch          = "cnn-text"
-embed         = [32, 64, 128, "data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
+embed         = ["data/glove.6B.100d.txt", "data/glove.6B.300d.txt"]
 num_filters   = [64, 128]
 dropout       = [0.3, 0.5]
 learning_rate = [4e-3, 2e-3]

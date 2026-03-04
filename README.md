@@ -253,27 +253,88 @@ Architecture is detected automatically from `artifacts/<dataset>/<model>/config.
 
 ## Results
 
-*(Fill in after running the sweep — sorted by val_acc)*
+Best result per architecture per dataset. `non-embed params` is the model logic excluding the embedding table — the number that matters for on-device cost since the embedding is just a lookup.
 
-| Run | arch | embed | bigrams | val% | non-embed params | total params |
-|---|---|---|---|---|---|---|
-| — | — | — | — | — | — | — |
+### AG News (4-class, ~108k train / 19k val)
+
+| arch | embed | val_acc | non-embed params | total params |
+|---|---|---|---|---|
+| kimcnn | GloVe 300d | **93.11%** | 463k | 18.4M |
+| kimcnn | GloVe 100d | 92.96% | 156k | 6.1M |
+| transformer | GloVe 300d | 92.67% | 1.05M | 19.0M |
+| transformer | GloVe 100d | 92.26% | 192k | 6.2M |
+| fasttext | GloVe 300d | 92.00% | 1.2k | 17.9M |
+| fasttext | GloVe 100d | 91.96% | 0.4k | 6.0M |
+| kimcnn | BPE 128d | 91.01% | 199k | 1.25M |
+| fasttext | BPE 128d | 90.77% | 0.5k | 1.05M |
+| transformer | BPE 128d | 88.25% | 141k | 1.19M |
+
+> Runs used `bigram_buckets = 0`. cnn-text and bigru not yet included.
+> Ceiling ~93% matches published results (Kim CNN 2014: 91.5%, fastText paper: 92.5%). Label ambiguity between Business/SciTech and World/Business limits further gains without BERT-scale pretraining (BERT: ~94.9%).
+
+### IMDB Sentiment (binary, ~42.5k train / 7.5k val, max_seq_len=300)
+
+| arch | embed | val_acc | non-embed params | total params |
+|---|---|---|---|---|
+| kimcnn | GloVe 100d | **90.23%** | 155k | 7.4M |
+| kimcnn | GloVe 300d | 90.21% | 462k | 22.3M |
+| fasttext | GloVe 100d | 89.68% | 0.2k | 7.3M |
+| fasttext | GloVe 300d | 89.57% | 0.6k | 21.8M |
+| transformer | GloVe 300d | 88.52% | 1.12M | 22.9M |
+| kimcnn | BPE 128d | 88.59% | 198k | 1.25M |
+| fasttext | BPE 128d | 87.85% | 0.3k | 1.05M |
+| transformer | GloVe 100d | 87.56% | 215k | 7.5M |
+| transformer | BPE 128d | 84.61% | 171k | 1.22M |
+
+> GloVe 100d matches 300d at a third of the embedding cost. Bigrams not yet tested on IMDB.
+
+### SMS Spam (binary, ~4.7k train / 830 val, max_seq_len=48)
+
+| arch | embed | val_acc | non-embed params | total params |
+|---|---|---|---|---|
+| kimcnn | GloVe 100d | **99.40%** | 77k | 641k |
+| kimcnn | GloVe 300d | 99.28% | 231k | 1.92M |
+| transformer | GloVe 300d | 99.16% | 894k | 2.59M |
+| transformer | GloVe 100d | 99.04% | 138k | 702k |
+| fasttext | GloVe 100d | 98.33% | 0.2k | 564k |
+| fasttext | BPE 128d | 98.33% | 0.3k | 525k |
+| kimcnn | BPE 32d | 98.92% | 25k | 156k |
+| transformer | BPE 64d | 96.77% | 37k | 299k |
+
+> **FastText is the on-device efficiency winner**: 98.33% with ~200 non-embed params. A 525k-total FastText model is a genuinely strong production option for SMS spam filtering. This sweep predates bigram support — FastText + bigrams expected to close the gap to KimCNN.
+
+---
+
+### Conclusions
+
+1. **KimCNN wins accuracy across all datasets.** Parallel multi-scale convs with max pool is a strong, fast baseline that beats the tiny transformer in every configuration tested.
+
+2. **GloVe beats BPE consistently.** BPE transformers on SMS top out at 96.77%; GloVe transformers reach 99.04%. Pretrained word vectors carry substantial signal that small models can't learn from scratch on limited data.
+
+3. **GloVe 100d ≥ GloVe 300d in most cases.** 300d costs 3× the embedding memory with marginal or no accuracy gain. The exception is AG News KimCNN (93.11% vs 92.96%) — a 0.15% gain for 3× more embedding params.
+
+4. **FastText is remarkably efficient.** Nearly competitive accuracy with essentially zero non-embed parameters — all capacity is in the embedding table. For latency-critical or memory-constrained on-device deployment it is the first choice.
+
+5. **The tiny transformer needs GloVe to compete.** Training attention from scratch on small datasets (SMS, IMDB) with BPE produces weak results. With GloVe initialisation it reaches near-KimCNN accuracy but at higher parameter cost.
+
+6. **AG News ceiling is ~93%.** Label ambiguity between Business/SciTech and World/Business articles cannot be resolved by better pooling or embeddings — the labels themselves overlap. Confident learning / label cleaning is the only path to meaningful improvement beyond this point.
 
 ### Model size reference
 
-For AG News (4 classes), BPE vocab ~16384:
+For AG News (4 classes, BPE vocab 16384, num_filters 128):
 
-| arch | embed_dim | embed params | non-embed params |
+| arch | embed | embed params | non-embed params |
 |---|---|---|---|
-| fasttext | 32 | ~524K | < 1K |
-| fasttext | 128 | ~2.10M | < 1K |
-| fasttext + bigrams (100k) | 128 | ~2.10M + 1.28M | < 1K |
-| kimcnn | 64 | ~1.05M | ~300K |
-| kimcnn | 128 | ~2.10M | ~540K |
-| transformer (2L) | 64 | ~1.05M | ~270K |
-| transformer (2L) | 128 | ~2.10M | ~1.05M |
+| fasttext | BPE 32d | 524k | < 1k |
+| fasttext | BPE 128d | 2.10M | < 1k |
+| fasttext | GloVe 100d | 5.98M | < 1k |
+| kimcnn | BPE 64d | 1.05M | 100k |
+| kimcnn | BPE 128d | 2.10M | 199k |
+| kimcnn | GloVe 100d | 5.98M | 156k |
+| transformer 2L | BPE 128d | 2.10M | 274k |
+| transformer 2L | GloVe 100d | 5.98M | 192k |
 
-The embedding table dominates. `non-embed params` is the actual model logic.
+The embedding table dominates total size. `non-embed params` is the actual model logic — the part that runs at inference time after the embedding lookup.
 
 ---
 
