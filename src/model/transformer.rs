@@ -125,7 +125,7 @@ impl<B: Backend> TinyTransformer<B> {
         );                                                         // [B, L, E]
 
         // Mean pool over all positions (PAD reps are ~0 due to masking).
-        let x = x.mean_dim(1).squeeze::<2>();                     // [B, E]
+        let x = x.mean_dim(1).flatten::<2>(1, 2);                 // [B, E]
 
         let x = self.dropout.forward(x);
         self.classifier.forward(x)                                // [B, num_classes]

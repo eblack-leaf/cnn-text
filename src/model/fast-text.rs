@@ -113,11 +113,11 @@ impl<B: Backend> FastText<B> {
             );
             // counts: sum [B, L] + sum [B, L-1] → [B, 1] + [B, 1] = [B, 1]
             let counts = (mask_2d.clone().sum_dim(1) + big_mask_2d.sum_dim(1)).clamp_min(1.0);
-            emb.sum_dim(1).squeeze::<2>() / counts                        // [B, E]
+            emb.sum_dim(1).flatten::<2>(1, 2) / counts                    // [B, E]
         } else {
             // counts: sum [B, L] → [B, 1]
             let counts = mask_2d.sum_dim(1).clamp_min(1.0);              // [B, 1]
-            (tok_emb * mask_3d).sum_dim(1).squeeze::<2>() / counts       // [B, E]
+            (tok_emb * mask_3d).sum_dim(1).flatten::<2>(1, 2) / counts   // [B, E]
         };
 
         self.classifier.forward(x)

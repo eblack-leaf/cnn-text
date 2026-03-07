@@ -101,7 +101,7 @@ impl<B: Backend> KimCnn<B> {
         // out:  [B, F, L-k+1]  after conv
         // pool: [B, F]         after global max
         let c = activation::relu(conv.forward(x)); // [B, F, L-k+1]
-        c.max_dim(2).squeeze::<2>()                // [B, F]
+        c.max_dim(2).flatten::<2>(1, 2)            // [B, F]  — flatten dim 2 away; squeeze would also remove dim 0 when B=1
     }
 
     pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 2> {

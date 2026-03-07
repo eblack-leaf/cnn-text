@@ -98,7 +98,7 @@ impl<B: Backend> BiGru<B> {
         let h_bwd = h_bwd.flip([1]);                          // re-align with forward positions
 
         let h = Tensor::cat(vec![h_fwd, h_bwd], 2);          // [B, L, 2H]
-        let h = h.max_dim(1).squeeze::<2>();                  // [B, 2H]
+        let h = h.max_dim(1).flatten::<2>(1, 2);              // [B, 2H]
         let h = self.dropout.forward(h);
         self.classifier.forward(h)                            // [B, num_classes]
     }

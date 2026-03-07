@@ -170,6 +170,10 @@ r#"Usage:
     --freeze                        Freeze embedding weights
 
   predict <model> "<text>"          Run inference on a saved model
+  eval <model> [options]            Evaluate on val split — prints F1 + latency
+    --dataset <kind>                agnews|sms|imdb  [sms]
+    --data <path>                   Override dataset path
+    --val-ratio F                   Must match the ratio used at training  [0.15]
 "#
     );
 }
@@ -211,8 +215,23 @@ fn main() {
         Some("predict") => {
             let model = args.get(2).expect("Usage: predict <model> \"<text>\"");
             let text  = args.get(3).expect("Usage: predict <model> \"<text>\"");
-            let (class, confidence) = infer::predict(text, &format!("artifacts/{model}"));
-            println!("{class}  ({:.1}%)", confidence * 100.0);
+            let (class, confidence, latency_us) = infer::predict(text, &format!("artifacts/{model}"));
+            println!("{class}  ({:.1}%)  [{latency_us}µs]", confidence * 100.0);
+        }
+
+        // ── eval <model> --dataset <kind> [--data <path>] [--val-ratio F] ──────
+        Some("eval") => {
+            let model = args.get(2).expect("Usage: eval <model> --dataset <kind>");
+            let dataset_name = flag_str(&args, "--dataset").unwrap_or("sms");
+            let dataset_kind = datasets::DatasetKind::from_str(dataset_name)
+                .unwrap_or_else(|| {
+                    eprintln!("Unknown dataset '{dataset_name}'. Valid: agnews, sms, imdb");
+                    std::process::exit(1);
+                });
+            let dataset_path = flag_str(&args, "--data")
+                .unwrap_or_else(|| dataset_kind.default_path());
+            let val_ratio = flag_f32(&args, "--val-ratio").unwrap_or(0.15);
+            infer::eval(&format!("artifacts/{model}"), dataset_path, &dataset_kind, val_ratio);
         }
 
         // ── sweep <experiment.toml> ───────────────────────────────────────────
