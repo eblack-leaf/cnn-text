@@ -1,7 +1,4 @@
-use burn::{
-    backend::NdArray,
-    tensor::{activation::softmax, Int, Tensor, TensorData},
-};
+use burn::tensor::{activation::softmax, Int, Tensor, TensorData};
 use burn::data::dataset::Dataset;
 use std::time::Instant;
 
@@ -13,7 +10,10 @@ use crate::model::fast_text::FastText;
 use crate::model::kimcnn::KimCnn;
 use crate::model::transformer::TinyTransformer;
 
-type B = NdArray;
+#[cfg(feature = "gpu")]
+type B = burn::backend::Wgpu;
+#[cfg(not(feature = "gpu"))]
+type B = burn::backend::NdArray;
 
 fn read_arch(model_dir: &str) -> String {
     let raw = std::fs::read_to_string(format!("{model_dir}/config.json"))
